@@ -10976,35 +10976,42 @@ if os.path.exists(creds_file):
         pass
 
 if not username or not password:
-    # stdin is consumed by the heredoc, so read credentials directly from
-    # the terminal via /dev/tty.
-    try:
-        tty = open("/dev/tty", "r+")
-    except OSError as e:
-        print(f"ERROR: Cannot open /dev/tty for credential input: {e}", file=sys.stderr)
-        sys.exit(1)
-    print("[cluckers] Enter your Project Crown credentials.", file=tty, flush=True)
-    print("Username: ", end="", file=tty, flush=True)
-    username = tty.readline().rstrip("\n")
-    # getpass reads from /dev/tty by default — pass it explicitly to be safe.
+    # stdin is consumed by the heredoc pipe, so read from /dev/tty directly.
+    # Open separate fds for reading and writing to avoid seekability issues.
     import termios, tty as ttymod
-    print("Password: ", end="", file=tty, flush=True)
-    old = termios.tcgetattr(tty)
     try:
-        ttymod.setraw(tty)
-        password = ""
-        while True:
-            ch = tty.read(1)
-            if ch in ("\n", "\r"):
-                break
-            if ch == "\x7f":  # backspace
-                password = password[:-1]
-            else:
-                password += ch
+        tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+        tty_r = os.fdopen(os.dup(tty_fd), "r", buffering=1, closefd=True)
+        tty_w = os.fdopen(tty_fd,          "w", buffering=1, closefd=True)
+    except OSError as e:
+        print(f"ERROR: Cannot open /dev/tty: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        tty_w.write("[cluckers] Enter your Project Crown credentials.\n")
+        tty_w.write("Username: ")
+        tty_w.flush()
+        username = tty_r.readline().rstrip("\n")
+        tty_w.write("Password: ")
+        tty_w.flush()
+        old = termios.tcgetattr(tty_r)
+        try:
+            ttymod.setraw(tty_r)
+            password = ""
+            while True:
+                ch = tty_r.read(1)
+                if ch in ("\n", "\r"):
+                    break
+                if ch == "\x7f":  # backspace
+                    password = password[:-1]
+                else:
+                    password += ch
+        finally:
+            termios.tcsetattr(tty_r, termios.TCSADRAIN, old)
+            tty_w.write("\n")
+            tty_w.flush()
     finally:
-        termios.tcsetattr(tty, termios.TCSADRAIN, old)
-        print("", file=tty)
-        tty.close()
+        tty_r.close()
+        tty_w.close()
     os.makedirs(os.path.dirname(creds_file), exist_ok=True)
     with open(creds_file, "w") as f:
         f.write(f"{username}:{password}")
