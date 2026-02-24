@@ -263,15 +263,11 @@ install_sys_deps() {
     command_exists "${tool}" || to_install+=("${tool}")
   done
 
-  # mingw-w64 is needed to compile the helper binaries from source (Step 10).
-  if ! command_exists x86_64-w64-mingw32-gcc; then
-    case "${pkg_mgr}" in
-      apt)    to_install+=("mingw-w64") ;;
-      pacman) to_install+=("mingw-w64-gcc") ;;
-      dnf)    to_install+=("mingw64-gcc") ;;
-      zypper) to_install+=("cross-x86_64-w64-mingw32-gcc") ;;
-    esac
-  fi
+  # mingw-w64 is NOT required at runtime — shm_launcher.exe and xinput1_3.dll
+  # are pre-compiled and embedded as base64 in this script (Step 10 extracts
+  # them). mingw-w64 is only needed if you want to reproduce the binaries from
+  # source yourself (see the "Reproducible builds" section at the top of this
+  # script).
 
   if [[ ${#to_install[@]} -eq 0 ]]; then
     ok_msg "All required system tools are already installed."
@@ -1265,8 +1261,8 @@ main() {
   #
   # Detects your Linux distribution's package manager (apt for Ubuntu/Debian,
   # pacman for Arch, dnf for Fedora, zypper for openSUSE) and installs any
-  # missing tools. Also installs the MinGW cross-compiler (mingw-w64) so you
-  # can build the helper binaries from source (Step 10).
+  # missing tools. The MinGW cross-compiler is NOT installed here — the helper
+  # binaries (shm_launcher.exe, xinput1_3.dll) are pre-compiled and embedded.
   # --------------------------------------------------------------------------
   step_msg "Step 1 — Checking system tools..."
 
