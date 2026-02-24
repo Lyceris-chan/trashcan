@@ -2,11 +2,9 @@
 # ==============================================================================
 #  Cluckers Central — Linux Setup Script
 #
-#  Installs Wine, Windows libraries, the Cluckers Central launcher, and the
-#  game itself. Configures a gateway proxy (required for login on Linux) and
-#  optional Steam integration.
-#
-#  Credit: Linux login fix (gateway proxy) — oldtunasalad (Discord)
+#  Installs Wine, Windows libraries, and the game. Handles authentication
+#  directly via the Project Crown gateway API (no Windows launcher needed).
+#  Optionally configures Steam integration and Gamescope.
 #
 #  USAGE
 #    chmod +x cluckers-setup.sh          # make executable (first time only)
@@ -132,17 +130,6 @@ GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 --adapti
 # Path matches wine.PrefixPath() = DataDir()+"/prefix" in internal/wine/prefix.go.
 readonly WINEPREFIX="${HOME}/.cluckers/prefix"
 
-# Official Cluckers Central Windows installer. This is the same URL the
-# native cluckers Go binary downloads from (see internal/game/version.go).
-readonly INSTALLER_URL="https://updater.realmhub.io/cluckers-central_1.1.68_x64-setup.exe"
-
-# SHA-256 of the Cluckers Central installer above (version 1.1.68).
-# Verified against the file at INSTALLER_URL on 2026-02-24.
-# If the installer URL is ever updated, recompute with:
-#   sha256sum cluckers-central-setup.exe
-readonly INSTALLER_SHA256="15ae8ebb917caadb72213c179b309ac9142fa10d7f29e5661bbffda8490a36b3"
-readonly INSTALLER_PATH="/tmp/cluckers-central-setup.exe"
-
 # Launcher script written to ~/.local/bin during install.
 readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 
@@ -164,13 +151,6 @@ readonly GAME_EXE_REL="Realm-Royale/Binaries/Win64/ShippingPC-RealmGameNoEditor.
 
 # Steam AppID for Realm Royale (the underlying game engine).
 readonly REALM_ROYALE_APPID="813820"
-
-# Proxy: small Python program that forwards auth requests to the real server.
-# See Step 9 for a full explanation. Credit: oldtunasalad (Discord).
-readonly PROXY_INSTALL_DIR="${HOME}/.local/share/cluckers-central"
-readonly PROXY_SCRIPT="${PROXY_INSTALL_DIR}/gateway_proxy.py"
-readonly PROXY_PID_FILE="/tmp/cluckers_proxy.pid"
-readonly PROXY_LOG_FILE="/tmp/cluckers_proxy.log"
 
 # Tools directory: where shm_launcher.exe and xinput1_3.dll are installed.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
@@ -249,7 +229,7 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 
 # Installs missing system packages using the distro's package manager.
 #
-# Checks for: wine winetricks curl wget python3 unzip sha256sum mingw-w64.
+# Checks for: wine winetricks curl wget python3 unzip sha256sum.
 # Installs only what is absent. Supports apt, pacman, dnf, zypper.
 #
 # Arguments:
@@ -264,7 +244,7 @@ install_sys_deps() {
   done
 
   # mingw-w64 is NOT required at runtime — shm_launcher.exe and xinput1_3.dll
-  # are pre-compiled and embedded as base64 in this script (Step 10 extracts
+  # are pre-compiled and embedded as base64 in this script (Step 6 extracts
   # them). mingw-w64 is only needed if you want to reproduce the binaries from
   # source yourself (see the "Reproducible builds" section at the top of this
   # script).
@@ -430,21 +410,12 @@ verify_sha256() {
 # Removes everything this script created and cleans up Steam configuration.
 #
 # Globals:
-#   WINEPREFIX, PROXY_PID_FILE, LAUNCHER_SCRIPT, DESKTOP_FILE,
-#   ICON_PATH, PROXY_SCRIPT, TOOLS_DIR, REALM_ROYALE_APPID, APP_NAME
+#   WINEPREFIX, LAUNCHER_SCRIPT, DESKTOP_FILE,
+#   ICON_PATH, TOOLS_DIR, REALM_ROYALE_APPID, APP_NAME
 run_uninstall() {
   step_msg "Uninstalling Cluckers Central..."
 
-  # Stop any running proxy.
-  local old_pid=""
-  old_pid=$(cat "${PROXY_PID_FILE}" 2>/dev/null || true)
-  if [[ -n "${old_pid}" ]]; then
-    kill "${old_pid}" 2>/dev/null || true
-    rm -f "${PROXY_PID_FILE}"
-    ok_msg "Gateway proxy stopped."
-  fi
-
-  # Remove Wine prefix (contains game, launcher, and all Windows libraries).
+  # Remove Wine prefix (contains all Windows libraries and game config).
   if [[ -d "${WINEPREFIX}" ]]; then
     info_msg "Removing Wine prefix at ${WINEPREFIX}..."
     rm -rf "${WINEPREFIX}"
@@ -462,7 +433,6 @@ run_uninstall() {
     "${LAUNCHER_SCRIPT}"
     "${DESKTOP_FILE}"
     "${ICON_PATH}"
-    "${PROXY_SCRIPT}"
     "${TOOLS_DIR}/shm_launcher.exe"
     "${TOOLS_DIR}/xinput1_3.dll"
   )
@@ -470,7 +440,6 @@ run_uninstall() {
     "Launcher script"
     "Desktop shortcut"
     "Icon"
-    "Gateway proxy"
     "shm_launcher.exe"
     "xinput1_3.dll"
   )
@@ -1262,7 +1231,7 @@ main() {
   # Detects your Linux distribution's package manager (apt for Ubuntu/Debian,
   # pacman for Arch, dnf for Fedora, zypper for openSUSE) and installs any
   # missing tools. The MinGW cross-compiler is NOT installed here — the helper
-  # binaries (shm_launcher.exe, xinput1_3.dll) are pre-compiled and embedded.
+  # binaries (shm_launcher.exe, xinput1_3.dll) are pre-compiled and embedded (Step 6).
   # --------------------------------------------------------------------------
   step_msg "Step 1 — Checking system tools..."
 
@@ -1395,90 +1364,16 @@ main() {
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
+  # Only packages verified as required by cluckers/internal/wine/verify.go
+  # RequiredDLLs and createWithWinetricks(). WebView2 / vcrun2019 / dotnet are
+  # NOT included — this script authenticates directly via the gateway API in
+  # Python; no Windows launcher is needed. See the launcher script (Step 8).
   install_winetricks_pkg "vcrun2022" "Visual C++ 2015-2022 Redistributable"
   install_winetricks_pkg "d3dx11_43" "DirectX 11 helper DLL"
   install_winetricks_pkg "dxvk"      "DXVK (Vulkan-based Direct3D)"
-  # WebView2 is the browser-based UI framework used by cluckers-central.exe.
-  # Pre-installing it here means the NSIS installer's bundled WebView2
-  # bootstrapper finds it already present and skips its interactive GUI prompt.
-  install_winetricks_pkg "webview2"  "Microsoft Edge WebView2 Runtime"
 
   # --------------------------------------------------------------------------
-  # Step 5 — Download Cluckers Central installer
-  #
-  # Downloads the official Windows installer from the update server. This is
-  # the same file the native cluckers launcher uses (see INSTALLER_URL above).
-  # If the file is already present in /tmp it is reused to save bandwidth.
-  # --------------------------------------------------------------------------
-  step_msg "Step 5 — Downloading Cluckers Central installer..."
-
-  if [[ -f "${INSTALLER_PATH}" ]]; then
-    ok_msg "Installer already downloaded at ${INSTALLER_PATH} — skipping download."
-    # Always re-verify the checksum even on re-run (fast — no network needed).
-    verify_sha256 "${INSTALLER_PATH}" "${INSTALLER_SHA256}"
-  else
-    info_msg "Downloading from ${INSTALLER_URL}..."
-    curl -L --progress-bar -o "${INSTALLER_PATH}" "${INSTALLER_URL}" \
-      || error_exit "Download failed. Check your internet connection."
-    ok_msg "Download complete."
-  fi
-
-  verify_sha256 "${INSTALLER_PATH}" "${INSTALLER_SHA256}"
-
-  # --------------------------------------------------------------------------
-  # Step 6 — Install Cluckers Central
-  #
-  # Runs the Windows installer inside Wine (silently, with /S flag). The
-  # installer writes cluckers-central.exe to:
-  #   C:\Program Files\Cluckers Central\
-  # which Wine maps to:
-  #   ~/.cluckers/prefix/drive_c/Program Files/Cluckers Central/
-  # --------------------------------------------------------------------------
-  step_msg "Step 6 — Installing Cluckers Central..."
-
-  local app_install_dir="${WINEPREFIX}/drive_c/Program Files/Cluckers Central"
-  local app_exe_linux="${app_install_dir}/cluckers-central.exe"
-
-  if [[ -f "${app_exe_linux}" ]]; then
-    ok_msg "Cluckers Central already installed — skipping."
-  else
-    info_msg "Running installer (this may take a minute)..."
-    # /S — NSIS silent flag: no installer GUI or progress window.
-    # The installer is confirmed NSIS (PE section .ndata, NSIS magic at 0x3667).
-    # WebView2 is pre-installed by winetricks (Step 4) so the bundled WebView2
-    # bootstrapper finds it already present and skips its interactive prompt.
-    wine "${INSTALLER_PATH}" /S \
-      || error_exit "Installer failed. Run with --verbose to see Wine output."
-    ok_msg "Cluckers Central installed."
-  fi
-
-  if [[ ! -f "${app_exe_linux}" ]]; then
-    error_exit "Expected exe not found at: ${app_exe_linux}
-Possible causes:
-  - The installer used a different installation path.
-  - Wine could not complete the installation.
-Try running with --verbose and check the output."
-  fi
-
-  local app_exe_dir
-  app_exe_dir=$(dirname "${app_exe_linux}")
-
-  # --------------------------------------------------------------------------
-  # Step 7 — Configure .env for gateway proxy
-  #
-  # The .env file tells Cluckers Central to route its auth requests through the
-  # local gateway proxy (127.0.0.1:18080) instead of directly to the game
-  # server. On Linux, direct connections to the auth server silently fail.
-  # The proxy is started automatically by the launcher script before each
-  # play session. See Step 9 for the full explanation.
-  # --------------------------------------------------------------------------
-  step_msg "Step 7 — Writing .env for gateway proxy..."
-
-  printf 'API_BASE_URL=http://127.0.0.1:18080\n' > "${app_exe_dir}/.env"
-  ok_msg ".env written to ${app_exe_dir}/.env"
-
-  # --------------------------------------------------------------------------
-  # Step 8 — Download and verify game files
+  # Step 5 — Download and verify game files
   #
   # Downloads the game zip (~5.3 GB) from the update server with resume
   # support (if a previous download was interrupted it continues from where
@@ -1486,7 +1381,7 @@ Try running with --verbose and check the output."
   # value from version.json — the same check the native launcher performs
   # (see internal/game/download.go DownloadAndVerify).
   # --------------------------------------------------------------------------
-  step_msg "Step 8 — Downloading game files..."
+  step_msg "Step 5 — Downloading game files..."
 
   mkdir -p "${GAME_DIR}"
 
@@ -1566,165 +1461,7 @@ BLAKE3EOF
   fi
 
   # --------------------------------------------------------------------------
-  # Step 9 — Install gateway proxy
-  #
-  # Credit: Linux login fix discovered and documented by oldtunasalad (Discord).
-  #
-  # WHY LOGIN FAILS ON LINUX WITHOUT THIS
-  # When you click Play in Cluckers Central, the launcher contacts
-  # gateway-dev.project-crown.com to verify your account and get a login token.
-  # On Linux this request silently fails — the response never arrives and Play
-  # does nothing. This is not related to graphics settings or Gamescope.
-  #
-  # THE FIX
-  # A small Python proxy runs on your machine at 127.0.0.1:18080. The .env
-  # file (Step 7) tells the launcher to send its auth requests there instead
-  # of directly to the server. The proxy forwards them over a connection that
-  # works on Linux and returns the response. The launcher never knows.
-  #
-  # The proxy is started automatically before each session by the launcher
-  # script (Step 12) and stopped when you close the game.
-  #
-  # To debug login issues:  cat /tmp/cluckers_proxy.log
-  #
-  # The proxy source is embedded in this script — never downloaded from the
-  # internet — so it cannot be tampered with by a third party.
-  # --------------------------------------------------------------------------
-  step_msg "Step 9 — Installing gateway proxy (required for login on Linux)..."
-
-  mkdir -p "${PROXY_INSTALL_DIR}"
-
-  cat > "${PROXY_SCRIPT}" << 'PROXYEOF'
-#!/usr/bin/env python3
-"""Cluckers Central gateway proxy.
-
-Fixes login on Linux by relaying auth requests from the Cluckers Central
-launcher to the game's real authentication server.
-
-The launcher is configured via .env to talk to http://127.0.0.1:18080.
-This proxy receives those requests and forwards them to
-https://gateway-dev.project-crown.com over a connection that works on Linux.
-
-Credit: login fix discovered and documented by oldtunasalad (Discord).
-
-Started and stopped automatically by the launcher script. You do not
-normally need to run it manually.
-
-Manual use (for debugging):
-    python3 gateway_proxy.py
-"""
-
-import http.server
-import json
-import logging
-import sys
-from typing import Optional
-
-try:
-    import requests
-    from requests import Session
-except ImportError:
-    print("ERROR: The 'requests' library is not installed.", file=sys.stderr)
-    print("Fix:   pip install requests", file=sys.stderr)
-    sys.exit(1)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[proxy] %(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-)
-_LOG: logging.Logger = logging.getLogger(__name__)
-
-# The real authentication server all requests are forwarded to.
-_TARGET: str = "https://gateway-dev.project-crown.com"
-
-# Port this proxy listens on. Must match API_BASE_URL in .env.
-_PORT: int = 18080
-
-# A persistent session reuses the TCP connection across requests.
-_SESSION: Session = requests.Session()
-
-# Headers that must not be forwarded upstream (RFC 7230 §6.1).
-_HOP_BY_HOP_REQUEST: frozenset = frozenset(
-    {"host", "transfer-encoding", "connection"}
-)
-_HOP_BY_HOP_RESPONSE: frozenset = frozenset(
-    {"transfer-encoding", "connection", "content-encoding", "content-length"}
-)
-
-
-class _GatewayProxyHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP handler that forwards every request to the game auth server."""
-
-    def do_GET(self) -> None:  # noqa: N802
-        """Forward a GET request."""
-        self._forward("GET")
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Forward a POST request."""
-        self._forward("POST")
-
-    def do_PUT(self) -> None:  # noqa: N802
-        """Forward a PUT request."""
-        self._forward("PUT")
-
-    def _forward(self, method: str) -> None:
-        """Forward a request to _TARGET and relay the response.
-
-        Args:
-            method: HTTP method string, e.g. "GET" or "POST".
-        """
-        url: str = _TARGET + self.path
-        content_length: int = int(self.headers.get("Content-Length", 0))
-        body: Optional[bytes] = (
-            self.rfile.read(content_length) if content_length > 0 else None
-        )
-        headers = {
-            k: v
-            for k, v in self.headers.items()
-            if k.lower() not in _HOP_BY_HOP_REQUEST
-        }
-        headers["Host"] = "gateway-dev.project-crown.com"
-        try:
-            resp = _SESSION.request(
-                method, url, headers=headers, data=body, timeout=30
-            )
-            _LOG.info("%s %s -> %d", method, self.path, resp.status_code)
-            self.send_response(resp.status_code)
-            for key, value in resp.headers.items():
-                if key.lower() not in _HOP_BY_HOP_RESPONSE:
-                    self.send_header(key, value)
-            self.send_header("Content-Length", str(len(resp.content)))
-            self.end_headers()
-            self.wfile.write(resp.content)
-        except Exception as exc:  # pylint: disable=broad-except
-            _LOG.error("%s %s -> 502 (%s)", method, self.path, exc)
-            error_body: bytes = json.dumps({"error": str(exc)}).encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(error_body)))
-            self.end_headers()
-            self.wfile.write(error_body)
-
-    def log_message(self, fmt: str, *args) -> None:  # type: ignore[override]
-        """Suppress default per-request console output (handled by _LOG)."""
-
-
-if __name__ == "__main__":
-    server = http.server.HTTPServer(("127.0.0.1", _PORT), _GatewayProxyHandler)
-    _LOG.info("Gateway proxy listening on 127.0.0.1:%d", _PORT)
-    _LOG.info("Forwarding to %s", _TARGET)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        _LOG.info("Proxy stopped.")
-PROXYEOF
-
-  chmod +x "${PROXY_SCRIPT}"
-  ok_msg "Gateway proxy installed at: ${PROXY_SCRIPT}"
-
-  # --------------------------------------------------------------------------
-  # Step 10 — Install helper binaries (shm_launcher.exe + xinput1_3.dll)
+  # Step 6 — Install helper binaries (shm_launcher.exe + xinput1_3.dll)
   #
   # Two small Windows helper binaries are required for full game functionality:
   #
@@ -1759,7 +1496,7 @@ PROXYEOF
   #        shm_launcher.exe : 9e0228a69a789ac02d279635f24f8903341d3c165199a088a8e82db62c7a1366
   #        xinput1_3.dll    : 81209542e35fda123d524ad59b1e533fda55818ab29da9f03d8b7b2af5ee9a80
   # --------------------------------------------------------------------------
-  step_msg "Step 10 — Installing helper binaries..."
+  step_msg "Step 6 — Installing helper binaries..."
 
   mkdir -p "${TOOLS_DIR}"
 
@@ -11074,24 +10811,25 @@ XDLL_B64_EOF
   ok_msg "xinput1_3.dll placed in Wine system32."
 
   # --------------------------------------------------------------------------
-  # Step 11 — Extract desktop icon
+  # Step 7 — Extract desktop icon
   #
   # Extracts the Cluckers Central icon from the .exe so it appears correctly
   # in Steam and your application menu. Requires icoutils (wrestool + icotool).
   # If icoutils is missing the script offers to install it; if that also fails
   # the game still works but will show a generic Wine icon.
   # --------------------------------------------------------------------------
-  step_msg "Step 11 — Extracting desktop icon..."
+  step_msg "Step 7 — Extracting desktop icon..."
 
   mkdir -p "${ICON_DIR}"
 
   if [[ -f "${ICON_PATH}" ]]; then
     ok_msg "Icon already extracted — skipping."
   elif command_exists wrestool && command_exists icotool; then
-    info_msg "Extracting icon from ${app_exe_linux}..."
+    local game_exe_for_icon="${GAME_DIR}/${GAME_EXE_REL}"
+    info_msg "Extracting icon from game executable..."
     local ico_tmp
     ico_tmp=$(mktemp --suffix=.ico)
-    if wrestool -x --type=14 -o "${ico_tmp}" "${app_exe_linux}" 2>/dev/null \
+    if wrestool -x --type=14 -o "${ico_tmp}" "${game_exe_for_icon}" 2>/dev/null \
         && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp}" 2>/dev/null; then
       ok_msg "Icon extracted to ${ICON_PATH}"
     else
@@ -11115,7 +10853,7 @@ XDLL_B64_EOF
         install_icoutils "${pkg_mgr}"
         local ico_tmp2
         ico_tmp2=$(mktemp --suffix=.ico)
-        wrestool -x --type=14 -o "${ico_tmp2}" "${app_exe_linux}" 2>/dev/null \
+        wrestool -x --type=14 -o "${ico_tmp2}" "${game_exe_for_icon}" 2>/dev/null \
           && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp2}" 2>/dev/null \
           && ok_msg "Icon extracted." \
           || warn_msg "Extraction still failed — using generic icon."
@@ -11129,7 +10867,7 @@ XDLL_B64_EOF
   fi
 
   # --------------------------------------------------------------------------
-  # Step 12 — Create launcher script
+  # Step 8 — Create launcher script
   #
   # Writes ~/.local/bin/cluckers-central.sh — a small shell script that:
   #   1. Writes the .env file so the launcher uses the local proxy.
@@ -11146,7 +10884,7 @@ XDLL_B64_EOF
   #                              implementation instead of Wine's built-in one.
   #   WINEFSYNC=1              — enables futex-based sync (Proton-GE only).
   # --------------------------------------------------------------------------
-  step_msg "Step 12 — Creating launcher script..."
+  step_msg "Step 8 — Creating launcher script..."
 
   local real_wine_path=""
   real_wine_path=$(command -v wine) \
@@ -11182,68 +10920,192 @@ if [[ "${WINE_BIN}" == *"GE-Proton"* ]] || [[ "${WINE_BIN}" == *"proton-ge"* ]];
 fi
 unset WINE_BIN
 
-APP_EXE="${app_exe_linux}"
-APP_EXE_DIR="${app_exe_dir}"
+GAME_DIR="${GAME_DIR}"
+
 TOOLS_DIR="${TOOLS_DIR}"
 NO_GAMESCOPE="${no_gamescope}"
 GS_ARGS="${final_gamescope_opts}"
-PROXY_SCRIPT="${PROXY_SCRIPT}"
-PROXY_PID_FILE="${PROXY_PID_FILE}"
-PROXY_LOG_FILE="${PROXY_LOG_FILE}"
+GATEWAY_URL="https://gateway-dev.project-crown.com"
+HOST_X="157.90.131.105"
+CREDS_FILE="${HOME}/.cluckers/credentials.enc"
 EOF
 
-  # Part 2: launch-time logic (single-quoted; variables expand when run).
+
+  # Part 2: launch-time auth + game launch logic.
+  # Variables written in Part 1 expand at run time; this block is single-quoted
+  # so it is stored verbatim and NOT expanded now.
   cat >> "${LAUNCHER_SCRIPT}" << 'LAUNCHEOF'
 
-# Write the .env file that tells the launcher to use the local proxy.
-# Must live next to cluckers-central.exe.
-printf 'API_BASE_URL=http://127.0.0.1:18080\n' > "${APP_EXE_DIR}/.env"
+# ---------------------------------------------------------------------------
+# Authentication - direct Python calls to the Project Crown gateway API.
+# Mirrors auth.Login / auth.GetOIDCToken / auth.GetContentBootstrap from
+# cluckers/internal/auth/login.go. No Windows launcher or proxy needed.
+# ---------------------------------------------------------------------------
+_auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
+import base64, getpass, json, os, sys, urllib.request, urllib.error
 
-# Stop any stale proxy from a previous crashed session.
-if [[ -f "${PROXY_PID_FILE}" ]]; then
-  old_pid=$(cat "${PROXY_PID_FILE}" 2>/dev/null || true)
-  if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-    kill "${old_pid}" 2>/dev/null || true
-    sleep 1
-  fi
-  rm -f "${PROXY_PID_FILE}"
+creds_file = sys.argv[1]
+gateway    = sys.argv[2].rstrip("/")
+
+def _post(endpoint, payload):
+    url  = f"{gateway}/{endpoint}"
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "cluckers-setup"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+def _flex_bool(val):
+    if isinstance(val, bool):   return val
+    if isinstance(val, (int, float)): return val != 0
+    if isinstance(val, str):    return val.lower() in ("true", "1", "yes")
+    return False
+
+# Load or prompt for credentials.
+username = password = ""
+if os.path.exists(creds_file):
+    try:
+        with open(creds_file) as f:
+            line = f.read().strip()
+        username, password = line.split(":", 1)
+    except Exception:
+        pass
+
+if not username or not password:
+    print("[cluckers] Enter your Project Crown credentials.", file=sys.stderr)
+    username = input("Username: ")
+    password = getpass.getpass("Password: ")
+    os.makedirs(os.path.dirname(creds_file), exist_ok=True)
+    with open(creds_file, "w") as f:
+        f.write(f"{username}:{password}")
+    os.chmod(creds_file, 0o600)
+
+# Login - mirrors auth.Login() in internal/auth/login.go.
+try:
+    login = _post("LAUNCHER_LOGIN_OR_LINK",
+                  {"user_name": username, "password": password})
+except urllib.error.URLError as e:
+    print(f"ERROR: Cannot reach gateway ({e})", file=sys.stderr)
+    sys.exit(1)
+
+if not _flex_bool(login.get("SUCCESS")):
+    msg = login.get("TEXT_VALUE") or "unknown error"
+    print(f"ERROR: Login failed: {msg}", file=sys.stderr)
+    try:
+        os.remove(creds_file)
+    except OSError:
+        pass
+    sys.exit(1)
+
+access_token = login.get("ACCESS_TOKEN", "")
+if not access_token:
+    print("ERROR: No access token in login response", file=sys.stderr)
+    sys.exit(1)
+
+# OIDC token - mirrors auth.GetOIDCToken() in internal/auth/login.go.
+try:
+    oidc_resp = _post("LAUNCHER_EAC_OIDC_TOKEN",
+                      {"user_name": username, "access_token": access_token})
+    oidc_token = (oidc_resp.get("PORTAL_INFO_1")
+                  or oidc_resp.get("STRING_VALUE")
+                  or oidc_resp.get("TEXT_VALUE", ""))
+except Exception:
+    oidc_token = ""
+
+# Content bootstrap - mirrors auth.GetContentBootstrap() in internal/auth/login.go.
+# Expected: 136-byte blob with BPS1 magic header (base64-encoded in response).
+bootstrap_b64 = ""
+try:
+    boot_resp = _post("LAUNCHER_CONTENT_BOOTSTRAP",
+                      {"user_name": username, "access_token": access_token})
+    raw = (boot_resp.get("PORTAL_INFO_1") or boot_resp.get("STRING_VALUE", ""))
+    if raw:
+        decoded = base64.b64decode(raw)
+        if len(decoded) == 136:
+            bootstrap_b64 = raw
+except Exception:
+    pass
+
+print(username)
+print(access_token)
+print(oidc_token)
+print(bootstrap_b64)
+AUTHEOF
+)
+
+if [[ $? -ne 0 ]]; then
+  printf '\n[ERROR] Authentication failed. Check your credentials.\n' >&2
+  exit 1
 fi
 
-# Start the gateway proxy in the background.
-# Logs are appended to PROXY_LOG_FILE; check it if login fails:
-#   cat /tmp/cluckers_proxy.log
-python3 "${PROXY_SCRIPT}" >> "${PROXY_LOG_FILE}" 2>&1 &
-PROXY_PID=$!
-printf '%s\n' "${PROXY_PID}" > "${PROXY_PID_FILE}"
+_auth_username=$(printf '%s' "${_auth_result}" | sed -n '1p')
+_auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
+_auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
+_auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
 
-# Stop the proxy when this script exits for any reason (Ctrl+C, crash, etc.).
-cleanup_proxy() {
-  if [[ -n "${PROXY_PID:-}" ]] && kill -0 "${PROXY_PID}" 2>/dev/null; then
-    kill "${PROXY_PID}" 2>/dev/null || true
-  fi
-  rm -f "${PROXY_PID_FILE}"
+# Write OIDC token to a temp file; game reads it via -eac_oidc_token_file.
+_oidc_tmp=$(mktemp /tmp/cluckers_oidc_XXXXXX)
+printf '%s' "${_auth_oidc}" > "${_oidc_tmp}"
+# Convert Linux path to Windows path for Wine (e.g. /tmp/x -> Z:\tmp\x).
+_oidc_wine=$(printf '%s' "${_oidc_tmp}" | sed 's|/|\\|g; s|^|Z:|')
+
+_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
+_game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
+
+# Shared-memory name - unique per session PID.
+_shm_name="Local\\realm_content_bootstrap_$$"
+
+# Game launch arguments - matches gameArgs in internal/launch/process_linux.go.
+_game_args=(
+  "-user=${_auth_username}"
+  "-token=${_auth_token}"
+  "-eac_oidc_token_file=${_oidc_wine}"
+  "-hostx=${HOST_X}"
+  "-Language=INT"
+  "-dx11"
+  "-content_bootstrap_size=136"
+  "-seekfreeloadingpcconsole"
+  "-nohomedir"
+)
+
+# Cleanup temp files on exit.
+_cleanup() {
+  rm -f "${_oidc_tmp}" "${_bootstrap_tmp:-}"
 }
-trap cleanup_proxy EXIT
+trap _cleanup EXIT
 
-# Give the proxy a moment to bind its port before the launcher connects.
-sleep 1
+if [[ -n "${_auth_bootstrap}" ]]; then
+  # Write bootstrap blob and launch via shm_launcher.exe.
+  # shm_launcher.exe maps the blob into a named Win32 shared memory region
+  # that the game reads on startup. Source: cluckers/tools/shm_launcher.c
+  _bootstrap_tmp=$(mktemp /tmp/cluckers_bootstrap_XXXXXX)
+  printf '%s' "${_auth_bootstrap}" | base64 -d > "${_bootstrap_tmp}"
+  _bootstrap_wine=$(printf '%s' "${_bootstrap_tmp}" | sed 's|/|\\|g; s|^|Z:|')
+  _game_args+=("-content_bootstrap_shm=${_shm_name}")
 
-# Launch Cluckers Central under Wine (optionally inside Gamescope).
-#
-# Gamescope (--no-gamescope/-g flag to skip) is a Valve compositor that runs
-# the game in an isolated display session. On Wayland desktops (COSMIC, GNOME,
-# KDE Wayland) it prevents the mouse from escaping the game window.
-# On X11 desktops it is optional but harmless.
-#
-# The GS_ARGS variable is baked in at setup time. To change Gamescope flags
-# (resolution, refresh rate, etc.) re-run cluckers-setup.sh with --no-gamescope
-# and edit the launcher script to add your own Gamescope invocation.
-if [[ "${NO_GAMESCOPE}" == "true" ]]; then
-  wine "${APP_EXE}"
+  if [[ "${NO_GAMESCOPE}" == "true" ]]; then
+    wine "${TOOLS_DIR}/shm_launcher.exe" \
+      "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
+      "${_game_args[@]}"
+  else
+    # shellcheck disable=SC2086
+    ${GS_ARGS} -- \
+      wine "${TOOLS_DIR}/shm_launcher.exe" \
+        "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
+        "${_game_args[@]}"
+  fi
 else
-  # shellcheck disable=SC2086
-  # GS_ARGS contains multiple separate flags and must be word-split.
-  ${GS_ARGS} -- wine "${APP_EXE}"
+  # No bootstrap data - launch game directly without shm_launcher.exe.
+  # Source: process_linux.go "No bootstrap data -- launch game directly."
+  if [[ "${NO_GAMESCOPE}" == "true" ]]; then
+    wine "${_game_exe}" "${_game_args[@]}"
+  else
+    # shellcheck disable=SC2086
+    ${GS_ARGS} -- wine "${_game_exe}" "${_game_args[@]}"
+  fi
 fi
 LAUNCHEOF
 
@@ -11251,13 +11113,13 @@ LAUNCHEOF
   ok_msg "Launcher script created at: ${LAUNCHER_SCRIPT}"
 
   # --------------------------------------------------------------------------
-  # Step 13 — Create .desktop shortcut
+  # Step 9 — Create .desktop shortcut
   #
   # The .desktop file tells your application menu (GNOME, KDE, etc.) about
   # the game: its name, icon, and how to launch it. After install you will
   # find "Cluckers Central" in your app grid / start menu.
   # --------------------------------------------------------------------------
-  step_msg "Step 13 — Creating desktop shortcut..."
+  step_msg "Step 9 — Creating desktop shortcut..."
 
   mkdir -p "$(dirname "${DESKTOP_FILE}")"
   cat > "${DESKTOP_FILE}" << EOF
@@ -11281,7 +11143,7 @@ EOF
   ok_msg "Desktop shortcut created at: ${DESKTOP_FILE}"
 
   # --------------------------------------------------------------------------
-  # Step 14 — Steam integration (optional)
+  # Step 10 — Steam integration (optional)
   #
   # Adds Cluckers Central to Steam as a non-Steam game shortcut so you can
   # launch it from your Steam library and access the Steam overlay and
@@ -11294,7 +11156,7 @@ EOF
   # Steam must be closed before we write its config files. If Steam is running
   # the changes will be overwritten when Steam exits.
   # --------------------------------------------------------------------------
-  step_msg "Step 14 — Configuring Steam integration (optional)..."
+  step_msg "Step 10 — Configuring Steam integration (optional)..."
 
   local steam_root=""
   local candidate
@@ -11489,7 +11351,7 @@ PYEOF
   # --------------------------------------------------------------------------
   printf "\n"
   # --------------------------------------------------------------------------
-  # Step 15 — Steam Deck patches (--steam-deck / -d only)
+  # Step 11 — Steam Deck patches (--steam-deck / -d only)
   #
   # Only runs when --steam-deck / -d is passed. Applies three patches that
   # mirror what the native cluckers launcher does via PatchDeckConfig() in
@@ -11518,15 +11380,15 @@ PYEOF
   # idempotent skip-guards:
   #   • Wine prefix already exists    → Step 3 skips wineboot
   #   • winetricks log present        → Step 4 skips each already-installed pkg
-  #   • Installer already in /tmp     → Step 5 re-verifies checksum, skips download
-  #   • cluckers-central.exe present  → Step 6 skips Wine installer
-  #   • Game exe present              → Step 8 skips the 5.3 GB download
-  #   • Tools already extracted       → Step 10 skips binary extraction
-  #   • Deck INIs already patched     → Step 15 patches report "already patched"
+  #   • Game exe present              → Step 5 skips the 5.3 GB download
+  #   • Tools already extracted       → Step 6 skips binary extraction
+  #   • Icon already extracted        → Step 7 skips icon extraction
+  #   • Launcher script present       → Step 8 skips launcher creation
+  #   • Deck INIs already patched     → Step 11 patches report "already patched"
   # A re-run with -d on an installed system therefore completes in seconds.
   # --------------------------------------------------------------------------
   if [[ "${steam_deck}" == "true" ]]; then
-    step_msg "Step 15 — Applying Steam Deck patches..."
+    step_msg "Step 11 — Applying Steam Deck patches..."
 
     if ! is_steam_deck; then
       warn_msg "Steam Deck hardware not detected (board_vendor != Valve)."
@@ -11545,8 +11407,10 @@ PYEOF
   printf "\n"
   printf "  Or launch from your application menu / Steam library.\n"
   printf "\n"
-  printf "  If login fails, check the proxy log:\n"
-  printf "    cat %s\n" "${PROXY_LOG_FILE}"
+  printf "  If login fails, delete credentials and re-run:\n"
+  printf "    rm ~/.cluckers/credentials.enc\n"
+  printf "  If the game crashes, check the Wine log:\n"
+  printf "    cat /tmp/cluckers_wine.log\n"
   printf "\n"
   printf "  To uninstall:\n"
   printf "    %b./cluckers-setup.sh --uninstall%b\n" "${BOLD}" "${NC}"
