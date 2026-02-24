@@ -1398,6 +1398,10 @@ main() {
   install_winetricks_pkg "vcrun2022" "Visual C++ 2015-2022 Redistributable"
   install_winetricks_pkg "d3dx11_43" "DirectX 11 helper DLL"
   install_winetricks_pkg "dxvk"      "DXVK (Vulkan-based Direct3D)"
+  # WebView2 is the browser-based UI framework used by cluckers-central.exe.
+  # Pre-installing it here means the NSIS installer's bundled WebView2
+  # bootstrapper finds it already present and skips its interactive GUI prompt.
+  install_winetricks_pkg "webview2"  "Microsoft Edge WebView2 Runtime"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download Cluckers Central installer
@@ -1439,17 +1443,11 @@ main() {
     ok_msg "Cluckers Central already installed — skipping."
   else
     info_msg "Running installer (this may take a minute)..."
-    # /VERYSILENT    — Inno Setup silent mode (no GUI, no progress window).
-    # /SUPPRESSMSGBOXES — suppress all message boxes (errors go to exit code).
-    # /NORESTART     — do not reboot after install (meaningless under Wine but
-    #                  prevents any reboot prompt that may appear).
-    # /DIR=...       — install to a fixed location inside the Wine prefix so
-    #                  the launcher script can find cluckers-central.exe reliably.
-    # Note: this is an Inno Setup installer, not NSIS. Inno Setup uses
-    # /VERYSILENT, not /S.
-    wine "${INSTALLER_PATH}" \
-      /VERYSILENT /SUPPRESSMSGBOXES /NORESTART \
-      "/DIR=C:\\Program Files\\Cluckers Central" \
+    # /S — NSIS silent flag: no installer GUI or progress window.
+    # The installer is confirmed NSIS (PE section .ndata, NSIS magic at 0x3667).
+    # WebView2 is pre-installed by winetricks (Step 4) so the bundled WebView2
+    # bootstrapper finds it already present and skips its interactive prompt.
+    wine "${INSTALLER_PATH}" /S \
       || error_exit "Installer failed. Run with --verbose to see Wine output."
     ok_msg "Cluckers Central installed."
   fi
