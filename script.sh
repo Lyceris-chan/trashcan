@@ -10910,15 +10910,16 @@ export WINEDEBUG="-all"
 # Source: cluckers/internal/launch/process_linux.go
 export WINEDLLOVERRIDES="dxgi=n"
 
-# WINEFSYNC=1: enable futex-based sync primitives in Proton-GE for lower CPU
-# usage and better frame times. Only set when using Proton-GE — system Wine
-# ignores it, but setting it unconditionally is harmless.
+# Wine binary path — baked in at setup time by cluckers-setup.sh.
+# Source: cluckers/internal/wine/detect.go (FindWine)
+WINE="${real_wine_path}"
+
+# WINEFSYNC=1: enable futex-based sync in Proton-GE for lower CPU usage.
+# Only set when using Proton-GE — system Wine ignores it.
 # Source: cluckers/internal/launch/process_linux.go (wine.IsProtonGE check)
-WINE_BIN=$(command -v wine 2>/dev/null || true)
-if [[ "${WINE_BIN}" == *"GE-Proton"* ]] || [[ "${WINE_BIN}" == *"proton-ge"* ]]; then
-  export WINEFSYNC=1
-fi
-unset WINE_BIN
+$(if [[ "${real_wine_path}" == *"GE-Proton"* ]] || [[ "${real_wine_path}" == *"proton-ge"* ]]; then
+  printf 'export WINEFSYNC=1\n'
+fi)
 
 GAME_DIR="${GAME_DIR}"
 
@@ -11087,13 +11088,13 @@ if [[ -n "${_auth_bootstrap}" ]]; then
   _game_args+=("-content_bootstrap_shm=${_shm_name}")
 
   if [[ "${NO_GAMESCOPE}" == "true" ]]; then
-    wine "${TOOLS_DIR}/shm_launcher.exe" \
+    "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
       "${_game_args[@]}"
   else
     # shellcheck disable=SC2086
     ${GS_ARGS} -- \
-      wine "${TOOLS_DIR}/shm_launcher.exe" \
+      "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
         "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
         "${_game_args[@]}"
   fi
@@ -11101,10 +11102,10 @@ else
   # No bootstrap data - launch game directly without shm_launcher.exe.
   # Source: process_linux.go "No bootstrap data -- launch game directly."
   if [[ "${NO_GAMESCOPE}" == "true" ]]; then
-    wine "${_game_exe}" "${_game_args[@]}"
+    "${WINE}" "${_game_exe}" "${_game_args[@]}"
   else
     # shellcheck disable=SC2086
-    ${GS_ARGS} -- wine "${_game_exe}" "${_game_args[@]}"
+    ${GS_ARGS} -- "${WINE}" "${_game_exe}" "${_game_args[@]}"
   fi
 fi
 LAUNCHEOF
