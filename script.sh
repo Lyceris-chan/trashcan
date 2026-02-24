@@ -10949,11 +10949,18 @@ creds_file = sys.argv[1]
 gateway    = sys.argv[2].rstrip("/")
 
 def _post(endpoint, payload):
-    url  = f"{gateway}/{endpoint}"
+    # URL format: /json/<command> — matches Client.Post() in gateway/client.go.
+    url  = f"{gateway}/json/{endpoint}"
     data = json.dumps(payload).encode()
     req  = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "cluckers-setup"},
+        headers={
+            "Content-Type": "application/json",
+            # User-Agent must match the Windows launcher to avoid server rejection.
+            # Source: req.Header.Set("User-Agent", ...) in gateway/client.go.
+            "User-Agent": "CluckersCentral/1.1.68",
+            "Accept": "*/*",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
