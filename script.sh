@@ -1352,25 +1352,22 @@ main() {
   # --------------------------------------------------------------------------
   # Step 4 — Windows runtime libraries
   #
-  # Installs the exact dependencies that cluckers uses (internal/wine/prefix.go
-  # createWithWinetricks). DO NOT add dotnet or extra packages — winetricks on
-  # system Wine only; Proton-GE prefixes must NOT run winetricks (it breaks the
-  # DLL override chain).
+  # Installs the exact redistributables required by Realm Royale, matching the
+  # Steam depot configuration:
+  #   Depot 228983 — VC 2010 Redist  (vcrun2010)
+  #   Depot 228984 — VC 2012 Redist  (vcrun2012)
+  #   Depot 228988 — VC 2019 Redist  (vcrun2019)
+  #   Depot 228990 — DirectX Jun 2010 Redist (directx9)
   #
-  # vcrun2022 — Visual C++ 2015-2022 Redistributable (required by the game)
-  # d3dx11_43 — DirectX 11 helper DLL (required for rendering)
-  # dxvk      — Vulkan-based Direct3D implementation (replaces Wine's built-in
-  #             d3d11/dxgi with a much faster Vulkan renderer)
+  # DXVK is NOT installed — the game uses DirectX 11 natively and does not
+  # need Vulkan translation. WINEDLLOVERRIDES=dxgi=n is not set either.
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
-  # Only packages verified as required by cluckers/internal/wine/verify.go
-  # RequiredDLLs and createWithWinetricks(). WebView2 / vcrun2019 / dotnet are
-  # NOT included — this script authenticates directly via the gateway API in
-  # Python; no Windows launcher is needed. See the launcher script (Step 8).
-  install_winetricks_pkg "vcrun2022" "Visual C++ 2015-2022 Redistributable"
-  install_winetricks_pkg "d3dx11_43" "DirectX 11 helper DLL"
-  install_winetricks_pkg "dxvk"      "DXVK (Vulkan-based Direct3D)"
+  install_winetricks_pkg "vcrun2010" "Visual C++ 2010 Redistributable"
+  install_winetricks_pkg "vcrun2012" "Visual C++ 2012 Redistributable"
+  install_winetricks_pkg "vcrun2019" "Visual C++ 2019 Redistributable"
+  install_winetricks_pkg "directx9"  "DirectX Jun 2010 Redistributable"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
@@ -10880,15 +10877,43 @@ XDLL_B64_EOF
   #                           LAUNCH TIME when the generated script runs.
   #
   # Environment variables set in the launcher (from internal/launch/process_linux.go):
-  #   WINEDLLOVERRIDES=dxgi=n  — forces Wine to use the native (DXVK) dxgi
-  #                              implementation instead of Wine's built-in one.
-  #   WINEFSYNC=1              — enables futex-based sync (Proton-GE only).
+  #   WINEFSYNC=1  — enables futex-based sync in Proton-GE (baked at setup time).
   # --------------------------------------------------------------------------
   step_msg "Step 8 — Creating launcher script..."
 
+  # Mirrors FindWine()+FindProtonGE() in cluckers/internal/wine/detect.go:
+  # Search Proton-GE dirs newest-first, then fall back to system wine.
+  # Proton-GE search dirs (same order as detect.go):
+  #   ~/.steam/steam/compatibilitytools.d/
+  #   ~/.local/share/Steam/compatibilitytools.d/
+  #   /usr/share/steam/compatibilitytools.d/
   local real_wine_path=""
-  real_wine_path=$(command -v wine) \
-    || error_exit "Cannot find the 'wine' binary. Is Wine installed?"
+  local _proton_dirs=(
+    "${HOME}/.steam/steam/compatibilitytools.d"
+    "${HOME}/.local/share/Steam/compatibilitytools.d"
+    "/usr/share/steam/compatibilitytools.d"
+  )
+  local _proton_dir _candidate
+  for _proton_dir in "${_proton_dirs[@]}"; do
+    if [[ ! -d "${_proton_dir}" ]]; then continue; fi
+    # Find all GE-Proton* wine binaries sorted newest first (by dir mtime).
+    while IFS= read -r _candidate; do
+      if [[ -x "${_candidate}" ]]; then
+        real_wine_path="${_candidate}"
+        break 2
+      fi
+    done < <(
+      find "${_proton_dir}" -maxdepth 2 \
+        -path "*/GE-Proton*/bin/wine" -o \
+        -path "*/proton-ge*/bin/wine" 2>/dev/null \
+        | sort -t/ -k7 -Vr
+    )
+  done
+  # Fall back to system wine if no Proton-GE found.
+  if [[ -z "${real_wine_path}" ]]; then
+    real_wine_path=$(command -v wine 2>/dev/null) \
+      || error_exit "No Wine or Proton-GE found. Install wine or Proton-GE."
+  fi
   ok_msg "Wine binary: ${real_wine_path}"
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
@@ -10904,11 +10929,6 @@ export WINEARCH="win64"
 
 # Suppress noisy Wine debug output. Set to "" to see full Wine diagnostics.
 export WINEDEBUG="-all"
-
-# dxgi=n: use the native (DXVK) Direct3D implementation instead of Wine's
-# built-in one. Required for the game to render correctly with DXVK.
-# Source: cluckers/internal/launch/process_linux.go
-export WINEDLLOVERRIDES="dxgi=n"
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
