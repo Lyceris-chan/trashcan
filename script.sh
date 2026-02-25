@@ -934,21 +934,33 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
 
 out_lines = []
 in_section = False
-found = False
+found_key = False
+section_exists = False
 
 for line in lines:
     trimmed = line.strip()
     if trimmed.startswith("[") and trimmed.endswith("]"):
+        if in_section and not found_key:
+            out_lines.append(target + "\n")
+            found_key = True
         in_section = (trimmed.lower() == "[fullscreenmovie]")
+        if in_section: section_exists = True
     
     if in_section and trimmed.lower().startswith("bforcenomovies="):
         line = target + "\n"
-        found = True
+        found_key = True
     
     out_lines.append(line)
 
-# If section exists but key was missing, we don't append here to stay safe.
-# Most UE3 builds have this key by default.
+# Handle case where section was at the very end of file
+if in_section and not found_key:
+    out_lines.append(target + "\n")
+    found_key = True
+
+# If section didn't exist at all, append it
+if not section_exists:
+    out_lines.append("\n[FullScreenMovie]\n")
+    out_lines.append(target + "\n")
 
 with open(path, "w", encoding="utf-8") as f:
     f.writelines(out_lines)
@@ -11541,13 +11553,26 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
     lines = f.readlines()
 out = []
 in_section = False
+found_key = False
+section_exists = False
 for line in lines:
     t = line.strip()
     if t.startswith("[") and t.endswith("]"):
+        if in_section and not found_key:
+            out.append(target + "\n")
+            found_key = True
         in_section = (t.lower() == "[fullscreenmovie]")
+        if in_section: section_exists = True
     if in_section and t.lower().startswith("bforcenomovies="):
         line = target + "\n"
+        found_key = True
     out.append(line)
+if in_section and not found_key:
+    out.append(target + "\n")
+    found_key = True
+if not section_exists:
+    out.append("\n[FullScreenMovie]\n")
+    out.append(target + "\n")
 with open(path, "w", encoding="utf-8") as f:
     f.writelines(out)
 MOVIE_PATCH_EOF
@@ -11759,17 +11784,18 @@ fi
 # how it exits (normal close, crash, or signal).
 _cleanup() {
   trap '' EXIT INT TERM HUP
-  # Kill gamescope if we launched it and it is still running.
-  if [[ -n "${_GS_PID:-}" ]] && kill -0 "${_GS_PID}" 2>/dev/null; then
-    kill "${_GS_PID}" 2>/dev/null || true
+  # Kill all background jobs (gamescope, wine, etc.)
+  local pids
+  pids=$(jobs -p)
+  if [[ -n "${pids}" ]]; then
+    # shellcheck disable=SC2086
+    kill ${pids} 2>/dev/null || true
   fi
   # Clean up the Wine server for this prefix.
   "${WINESERVER}" -k 2>/dev/null || true
   # Remove temp files we created.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
   [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
-  # Ensure all children (Wine, etc.) are killed by terminating the process group.
-  kill -TERM -- -$$ 2>/dev/null || true
 }
 trap _cleanup EXIT INT TERM HUP
 
