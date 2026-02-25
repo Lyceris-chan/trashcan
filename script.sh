@@ -16,7 +16,6 @@
 #    ./cluckers-setup.sh --steam-deck    # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller    # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --show-movies   # opt-out: show intro movies          (-m)
-#    ./cluckers-setup.sh --vanilla       # testing: use vanilla servers
 #    ./cluckers-setup.sh --update        # check for game update       (-U)
 #    ./cluckers-setup.sh --uninstall     # remove everything           (-u)
 #    ./cluckers-setup.sh --help          # show this help message      (-h)
@@ -253,15 +252,20 @@ install_sys_deps() {
   local to_install=()
   local tool
 
+  # Use pip3 as the check for pip.
   for tool in wine winetricks curl wget python3 unzip sha256sum "$@"; do
     command_exists "${tool}" || to_install+=("${tool}")
   done
-
-  # mingw-w64 is NOT required at runtime — shm_launcher.exe and xinput1_3.dll
-  # are pre-compiled and embedded as base64 in this script (Step 6 extracts
-  # them). mingw-w64 is only needed if you want to reproduce the binaries from
-  # source yourself (see the "Reproducible builds" section at the top of this
-  # script).
+  
+  # Explicitly check for pip3.
+  if ! command_exists pip && ! command_exists pip3; then
+    case "${pkg_mgr}" in
+      apt)    to_install+=("python3-pip") ;;
+      pacman) to_install+=("python-pip") ;;
+      dnf)    to_install+=("python3-pip") ;;
+      zypper) to_install+=("python3-pip") ;;
+    esac
+  fi
 
   if [[ ${#to_install[@]} -eq 0 ]]; then
     ok_msg "All required system tools are already installed."
@@ -274,16 +278,16 @@ install_sys_deps() {
       sudo dpkg --add-architecture i386
       sudo apt-get update -qq
       sudo apt-get install -y \
-        "${to_install[@]}" python3-pip wine32:i386 wine64 libwine:i386 fonts-wine
+        "${to_install[@]}" wine32:i386 wine64 libwine:i386 fonts-wine
       ;;
     pacman)
-      sudo pacman -Sy --noconfirm "${to_install[@]}" python-pip wine-mono wine-gecko
+      sudo pacman -Sy --noconfirm "${to_install[@]}" wine-mono wine-gecko
       ;;
     dnf)
-      sudo dnf install -y "${to_install[@]}" python3-pip
+      sudo dnf install -y "${to_install[@]}"
       ;;
     zypper)
-      sudo zypper install -y "${to_install[@]}" python3-pip
+      sudo zypper install -y "${to_install[@]}"
       ;;
   esac
 }
@@ -1377,7 +1381,6 @@ main() {
   local steam_deck="false"
   local controller_mode="false"
   local skip_movies="true"
-  local use_vanilla="false"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
@@ -1412,7 +1415,6 @@ main() {
       --no-controller)   controller_mode="false"; [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}" ;;
       --skip-movies)     skip_movies="true"; [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}" ;;
       --show-movies|-m)  skip_movies="false" ;;
-      --vanilla)         use_vanilla="true" ;;
       --help|-h)         print_help; exit 0 ;;
       *) ;;
     esac
@@ -1497,10 +1499,19 @@ main() {
   #   blake3   — computes hashes for game file integrity verification
   
   # Ensure pip is available.
-  if ! python3 -m pip --version > /dev/null 2>&1; then
-    info_msg "Python 'pip' module not found. Attempting to install..."
-    python3 -m ensurepip --user > /dev/null 2>&1 || true
-    python3 -m pip install --upgrade --user pip > /dev/null 2>&1 || true
+  local pip_cmd="pip"
+  if ! command_exists pip; then
+    if command_exists pip3; then
+      pip_cmd="pip3"
+    else
+      info_msg "Python 'pip' module not found. Attempting to install..."
+      python3 -m ensurepip --user > /dev/null 2>&1 || true
+      if python3 -m pip --version > /dev/null 2>&1; then
+        pip_cmd="python3 -m pip"
+      else
+        warn_msg "Could not find pip. Python library installation may fail."
+      fi
+    fi
   fi
 
   local -a py_libs=(vdf blake3)
@@ -1508,7 +1519,10 @@ main() {
   for lib in "${py_libs[@]}"; do
     if ! python3 -c "import ${lib}" > /dev/null 2>&1; then
       info_msg "Installing Python '${lib}' library..."
-      python3 -m pip install --quiet --user "${lib}" \
+      # Try standard install, then --user, then --break-system-packages (for Debian/Ubuntu 23.04+)
+      ${pip_cmd} install --quiet "${lib}" 2>/dev/null \
+        || ${pip_cmd} install --quiet --user "${lib}" 2>/dev/null \
+        || ${pip_cmd} install --quiet --user --break-system-packages "${lib}" 2>/dev/null \
         || warn_msg "Could not install the Python '${lib}' library. Some features may be limited."
       if python3 -c "import ${lib}" > /dev/null 2>&1; then
         ok_msg "Python '${lib}' installed."
@@ -11548,7 +11562,6 @@ TOOLS_DIR="${TOOLS_DIR}"
 USE_GAMESCOPE="${use_gamescope}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 SKIP_MOVIES="${skip_movies}"
-USE_VANILLA="${use_vanilla}"
 GATEWAY_URL="https://gateway-dev.project-crown.com"
 HOST_X="157.90.131.105"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
@@ -11619,13 +11632,7 @@ EOF
 # Mirrors auth.Login / auth.GetOIDCToken / auth.GetContentBootstrap from
 # cluckers/internal/auth/login.go. No Windows launcher or proxy needed.
 # ---------------------------------------------------------------------------
-_auth_username=""
-_auth_token=""
-_auth_oidc=""
-_auth_bootstrap=""
-
-if [[ "${USE_VANILLA}" != "true" ]]; then
-  _auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
+_auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
 import base64, json, os, sys, urllib.request, urllib.error
 
 creds_file = sys.argv[1]
@@ -11709,6 +11716,7 @@ if not username or not password:
 
 # Login - mirrors auth.Login() in internal/auth/login.go.
 try:
+    print("[auth] Logging in...", file=sys.stderr)
     login = _post("LAUNCHER_LOGIN_OR_LINK",
                   {"user_name": username, "password": password})
 except urllib.error.URLError as e:
@@ -11731,26 +11739,39 @@ if not access_token:
 
 # OIDC token - mirrors auth.GetOIDCToken() in internal/auth/login.go.
 try:
+    print("[auth] Requesting OIDC token...", file=sys.stderr)
     oidc_resp = _post("LAUNCHER_EAC_OIDC_TOKEN",
                       {"user_name": username, "access_token": access_token})
     oidc_token = (oidc_resp.get("PORTAL_INFO_1")
                   or oidc_resp.get("STRING_VALUE")
                   or oidc_resp.get("TEXT_VALUE", ""))
-except Exception:
+except Exception as e:
+    print(f"[auth] OIDC token failed: {e}", file=sys.stderr)
     oidc_token = ""
 
 # Content bootstrap - mirrors auth.GetContentBootstrap() in internal/auth/login.go.
 # Expected: 136-byte blob with BPS1 magic header (base64-encoded in response).
 bootstrap_b64 = ""
 try:
+    print("[auth] Requesting content bootstrap...", file=sys.stderr)
     boot_resp = _post("LAUNCHER_CONTENT_BOOTSTRAP",
                       {"user_name": username, "access_token": access_token})
     raw = (boot_resp.get("PORTAL_INFO_1") or boot_resp.get("STRING_VALUE", ""))
     if raw:
+        # Fix base64 padding if needed.
+        missing_padding = len(raw) % 4
+        if missing_padding:
+            raw += "=" * (4 - missing_padding)
+        
         decoded = base64.b64decode(raw)
-        if len(decoded) == 136:
-            bootstrap_b64 = raw
-except Exception:
+        if len(decoded) != 136:
+            print(f"[auth] WARNING: Unexpected bootstrap size: {len(decoded)} bytes (expected 136)", file=sys.stderr)
+        
+        if len(decoded) > 0:
+            bootstrap_b64 = base64.b64encode(decoded).decode()
+            print(f"[auth] Bootstrap received ({len(decoded)} bytes)", file=sys.stderr)
+except Exception as e:
+    print(f"[auth] Bootstrap failed: {e}", file=sys.stderr)
     pass
 
 print(username)
@@ -11758,18 +11779,17 @@ print(access_token)
 print(oidc_token)
 print(bootstrap_b64)
 AUTHEOF
-  )
+)
 
-  if [[ $? -ne 0 ]]; then
-    printf '\n[ERROR] Authentication failed. Check your credentials.\n' >&2
-    exit 1
-  fi
-
-  _auth_username=$(printf '%s' "${_auth_result}" | sed -n '1p')
-  _auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
-  _auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
-  _auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
+if [[ $? -ne 0 ]]; then
+  printf '\n[ERROR] Authentication failed. Check your credentials.\n' >&2
+  exit 1
 fi
+
+_auth_username=$(printf '%s' "${_auth_result}" | sed -n '1p')
+_auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
+_auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
+_auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
 
 
 # Temp files for OIDC token and bootstrap blob.
@@ -11795,26 +11815,17 @@ _game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
 _shm_name="Local\\realm_content_bootstrap_$$"
 
 # Game launch arguments — matches gameArgs in internal/launch/process_linux.go.
-if [[ "${USE_VANILLA}" == "true" ]]; then
-  _game_args=(
-    "-Language=INT"
-    "-dx11"
-    "-seekfreeloadingpcconsole"
-    "-nohomedir"
-  )
-else
-  _game_args=(
-    "-user=${_auth_username}"
-    "-token=${_auth_token}"
-    "-eac_oidc_token_file=${_oidc_wine}"
-    "-Language=INT"
-    "-dx11"
-    "-content_bootstrap_size=136"
-    "-seekfreeloadingpcconsole"
-    "-nohomedir"
-    "-hostx=${HOST_X}"
-  )
-fi
+_game_args=(
+  "-user=${_auth_username}"
+  "-token=${_auth_token}"
+  "-eac_oidc_token_file=${_oidc_wine}"
+  "-hostx=${HOST_X}"
+  "-Language=INT"
+  "-dx11"
+  "-content_bootstrap_size=136"
+  "-seekfreeloadingpcconsole"
+  "-nohomedir"
+)
 
 # Append bootstrap shared memory argument if a bootstrap blob is present.
 if [[ -s "${_bootstrap_tmp}" ]]; then
@@ -12117,13 +12128,8 @@ PYEOF
   printf "\n"
   printf "  Or launch from your application menu / Steam library.\n"
   printf "\n"
-  if [[ "${use_vanilla}" == "true" ]]; then
-    printf "  %b[VANILLA MODE]%b Game will launch with standard servers.\n" "${YELLOW}" "${NC}"
-    printf "  Custom hostx and authentication are bypassed.\n"
-  else
-    printf "  If login fails, delete credentials and re-run:\n"
-    printf "    rm ~/.cluckers/credentials.enc\n"
-  fi
+  printf "  If login fails, delete credentials and re-run:\n"
+  printf "    rm ~/.cluckers/credentials.enc\n"
   printf "  If the game crashes, check the Wine log:\n"
   printf "    cat /tmp/cluckers_wine.log\n"
   printf "\n"
