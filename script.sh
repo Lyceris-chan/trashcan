@@ -11521,19 +11521,19 @@ CREDS_FILE="${HOME}/.cluckers/credentials.enc"
 # Skip movies logic (mirrors HandleMovies in cluckers/internal/launch/movies.go)
 # Renames .bik files to .bak if SKIP_MOVIES is true.
 _handle_movies() {
-  local skip="$1"
+  local skip="\$1"
   local skip_val="False"
-  [[ "${skip}" == "true" ]] && skip_val="True"
+  [[ "\${skip}" == "true" ]] && skip_val="True"
 
-  local target="bForceNoMovies=${skip_val}"
+  local target="bForceNoMovies=\${skip_val}"
   local ini
 
   for ini in \
-    "${GAME_DIR}/Realm-Royale/RealmGame/Config/RealmEngine.ini" \
-    "${GAME_DIR}/Realm-Royale/Engine/Config/BaseEngine.ini"; do
-    [[ -f "${ini}" ]] || continue
+    "\${GAME_DIR}/Realm-Royale/RealmGame/Config/RealmEngine.ini" \
+    "\${GAME_DIR}/Realm-Royale/Engine/Config/BaseEngine.ini"; do
+    [[ -f "\${ini}" ]] || continue
 
-    python3 - "${ini}" "${target}" << 'MOVIE_PATCH_EOF'
+    python3 - "\${ini}" "\${target}" << 'MOVIE_PATCH_EOF'
 import sys
 path = sys.argv[1]
 target = sys.argv[2]
