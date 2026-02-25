@@ -11469,6 +11469,10 @@ XDLL_B64_EOF
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
 
+  local real_wineserver
+  real_wineserver="$(dirname "${real_wine_path}")/wineserver"
+  [[ ! -x "${real_wineserver}" ]] && real_wineserver="wineserver"
+
   # Part 1: setup-time values baked in as plain strings.
   cat > "${LAUNCHER_SCRIPT}" << EOF
 #!/usr/bin/env bash
@@ -11495,8 +11499,7 @@ export WINEDLLOVERRIDES="dxgi=n"
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
 WINE="${real_wine_path}"
-WINESERVER="$(dirname "${real_wine_path}")/wineserver"
-[[ ! -x "${WINESERVER}" ]] && WINESERVER="wineserver"
+WINESERVER="${real_wineserver}"
 
 # Sync primitives: ntsync (modern) or fsync (standard GE-Proton).
 # These improve game performance and reduce stutter by optimizing how
