@@ -248,10 +248,11 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 #   $1 - Package manager: "apt" | "pacman" | "dnf" | "zypper".
 install_sys_deps() {
   local -r pkg_mgr="$1"
+  shift
   local to_install=()
   local tool
 
-  for tool in wine winetricks curl wget python3 unzip sha256sum; do
+  for tool in wine winetricks curl wget python3 unzip sha256sum "$@"; do
     command_exists "${tool}" || to_install+=("${tool}")
   done
 
@@ -917,6 +918,7 @@ apply_game_patches() {
     info_msg "Patch: Restoring intro movies..."
   fi
 
+  # 1. Patch INI files.
   for ini in \
     "${config_dir}/RealmEngine.ini" \
     "${engine_config_dir}/BaseEngine.ini"; do
@@ -927,7 +929,7 @@ import sys, re
 
 path = sys.argv[1]
 skip = sys.argv[2].lower() == "true"
-target = "bForceNoMovies=" + ("True" if skip else "False")
+target = "bForceNoMovies=" + ("TRUE" if skip else "FALSE")
 
 with open(path, "r", encoding="utf-8", errors="replace") as f:
     lines = f.readlines()
@@ -1475,7 +1477,9 @@ main() {
     error_exit "No supported package manager found (apt / pacman / dnf / zypper)."
   fi
 
-  install_sys_deps "${pkg_mgr}"
+  local -a extra_tools=()
+  [[ "${use_gamescope}" == "true" ]] && extra_tools+=("gamescope")
+  install_sys_deps "${pkg_mgr}" "${extra_tools[@]}"
 
   # ~/.local/bin is not in PATH by default on all distros. Add it now so the
   # launcher script we create in Step 12 can be found immediately.
@@ -1487,13 +1491,20 @@ main() {
 
   # Python libraries used by this script:
   #   vdf      — reads/writes Steam's binary config files (shortcuts.vdf etc.)
-  if ! python3 -c "import vdf" > /dev/null 2>&1; then
-    info_msg "Installing Python 'vdf' library..."
-    python3 -m pip install --quiet --break-system-packages vdf 2>/dev/null \
-      || python3 -m pip install --quiet --user vdf \
-      || error_exit "Could not install the Python 'vdf' library."
-    ok_msg "Python 'vdf' installed."
-  fi
+  #   blake3   — computes hashes for game file integrity verification
+  local -a py_libs=(vdf blake3)
+  local lib
+  for lib in "${py_libs[@]}"; do
+    if ! python3 -c "import ${lib}" > /dev/null 2>&1; then
+      info_msg "Installing Python '${lib}' library..."
+      python3 -m pip install --quiet --break-system-packages "${lib}" 2>/dev/null \
+        || python3 -m pip install --quiet --user "${lib}" \
+        || warn_msg "Could not install the Python '${lib}' library. Some features may be limited."
+      if python3 -c "import ${lib}" > /dev/null 2>&1; then
+        ok_msg "Python '${lib}' installed."
+      fi
+    fi
+  done
 
   # --------------------------------------------------------------------------
   # Step 2 — Resolve game version
@@ -11498,7 +11509,8 @@ export WINEDEBUG="-all"
 
 # dxgi=n,b: Source: internal/launch/process_linux.go env append WINEDLLOVERRIDES
 # https://github.com/Lyceris-chan/cluckers/blob/main/internal/launch/process_linux.go
-export WINEDLLOVERRIDES="dxgi=n"
+# xinput1_3=n: Use our custom remapper from Step 6.
+export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
@@ -11531,15 +11543,16 @@ HOST_X="157.90.131.105"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
 
 # Skip movies logic (mirrors HandleMovies in cluckers/internal/launch/movies.go)
-# Renames .bik files to .bak if SKIP_MOVIES is true.
+# Patches INI files to set bForceNoMovies.
 _handle_movies() {
   local skip="\$1"
-  local skip_val="False"
-  [[ "\${skip}" == "true" ]] && skip_val="True"
+  local skip_val="FALSE"
+  [[ "\${skip}" == "true" ]] && skip_val="TRUE"
 
   local target="bForceNoMovies=\${skip_val}"
   local ini
 
+  # 1. Patch INI files.
   for ini in \
     "\${GAME_DIR}/Realm-Royale/RealmGame/Config/RealmEngine.ini" \
     "\${GAME_DIR}/Realm-Royale/Engine/Config/BaseEngine.ini"; do
@@ -11784,7 +11797,11 @@ fi
 # how it exits (normal close, crash, or signal).
 _cleanup() {
   trap '' EXIT INT TERM HUP
-  # Kill all background jobs (gamescope, wine, etc.)
+  # Kill gamescope if it is still running.
+  if [[ -n "${_GS_PID:-}" ]]; then
+    kill "${_GS_PID}" 2>/dev/null || true
+  fi
+  # Kill all background jobs (wine, etc.)
   local pids
   pids=$(jobs -p)
   if [[ -n "${pids}" ]]; then
@@ -11815,9 +11832,7 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   else
     "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
-      "${_game_args[@]}" &
-    _GS_PID=$!
-    wait "${_GS_PID}"
+      "${_game_args[@]}"
   fi
 else
   # No bootstrap data — launch game directly.
@@ -11828,9 +11843,7 @@ else
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    "${WINE}" "${_game_exe}" "${_game_args[@]}" &
-    _GS_PID=$!
-    wait "${_GS_PID}"
+    "${WINE}" "${_game_exe}" "${_game_args[@]}"
   fi
 fi
 
