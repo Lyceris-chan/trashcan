@@ -16,6 +16,7 @@
 #    ./cluckers-setup.sh --steam-deck    # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller    # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --show-movies   # opt-out: show intro movies          (-m)
+#    ./cluckers-setup.sh --vanilla       # testing: use vanilla servers
 #    ./cluckers-setup.sh --update        # check for game update       (-U)
 #    ./cluckers-setup.sh --uninstall     # remove everything           (-u)
 #    ./cluckers-setup.sh --help          # show this help message      (-h)
@@ -1376,6 +1377,7 @@ main() {
   local steam_deck="false"
   local controller_mode="false"
   local skip_movies="true"
+  local use_vanilla="false"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
@@ -1410,6 +1412,7 @@ main() {
       --no-controller)   controller_mode="false"; [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}" ;;
       --skip-movies)     skip_movies="true"; [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}" ;;
       --show-movies|-m)  skip_movies="false" ;;
+      --vanilla)         use_vanilla="true" ;;
       --help|-h)         print_help; exit 0 ;;
       *) ;;
     esac
@@ -11537,6 +11540,7 @@ TOOLS_DIR="${TOOLS_DIR}"
 USE_GAMESCOPE="${use_gamescope}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 SKIP_MOVIES="${skip_movies}"
+USE_VANILLA="${use_vanilla}"
 GATEWAY_URL="https://gateway-dev.project-crown.com"
 HOST_X="157.90.131.105"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
@@ -11607,7 +11611,13 @@ EOF
 # Mirrors auth.Login / auth.GetOIDCToken / auth.GetContentBootstrap from
 # cluckers/internal/auth/login.go. No Windows launcher or proxy needed.
 # ---------------------------------------------------------------------------
-_auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
+_auth_username=""
+_auth_token=""
+_auth_oidc=""
+_auth_bootstrap=""
+
+if [[ "${USE_VANILLA}" != "true" ]]; then
+  _auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
 import base64, json, os, sys, urllib.request, urllib.error
 
 creds_file = sys.argv[1]
@@ -11740,17 +11750,19 @@ print(access_token)
 print(oidc_token)
 print(bootstrap_b64)
 AUTHEOF
-)
+  )
 
-if [[ $? -ne 0 ]]; then
-  printf '\n[ERROR] Authentication failed. Check your credentials.\n' >&2
-  exit 1
+  if [[ $? -ne 0 ]]; then
+    printf '\n[ERROR] Authentication failed. Check your credentials.\n' >&2
+    exit 1
+  fi
+
+  _auth_username=$(printf '%s' "${_auth_result}" | sed -n '1p')
+  _auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
+  _auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
+  _auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
 fi
 
-_auth_username=$(printf '%s' "${_auth_result}" | sed -n '1p')
-_auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
-_auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
-_auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
 
 # Temp files for OIDC token and bootstrap blob.
 _oidc_tmp=$(mktemp /tmp/cluckers_oidc_XXXXXX)
@@ -11775,17 +11787,26 @@ _game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
 _shm_name="Local\\realm_content_bootstrap_$$"
 
 # Game launch arguments — matches gameArgs in internal/launch/process_linux.go.
-_game_args=(
-  "-user=${_auth_username}"
-  "-token=${_auth_token}"
-  "-eac_oidc_token_file=${_oidc_wine}"
-  "-hostx=${HOST_X}"
-  "-Language=INT"
-  "-dx11"
-  "-content_bootstrap_size=136"
-  "-seekfreeloadingpcconsole"
-  "-nohomedir"
-)
+if [[ "${USE_VANILLA}" == "true" ]]; then
+  _game_args=(
+    "-Language=INT"
+    "-dx11"
+    "-seekfreeloadingpcconsole"
+    "-nohomedir"
+  )
+else
+  _game_args=(
+    "-user=${_auth_username}"
+    "-token=${_auth_token}"
+    "-eac_oidc_token_file=${_oidc_wine}"
+    "-Language=INT"
+    "-dx11"
+    "-content_bootstrap_size=136"
+    "-seekfreeloadingpcconsole"
+    "-nohomedir"
+    "-hostx=${HOST_X}"
+  )
+fi
 
 # Append bootstrap shared memory argument if a bootstrap blob is present.
 if [[ -s "${_bootstrap_tmp}" ]]; then
