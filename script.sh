@@ -65,29 +65,12 @@
 #                        under Wine/Proton. Source: cluckers/tools/xinput_remap.c
 #                        + cluckers/tools/xinput1_3.def
 #
-#    To verify you get the same bytes, compile from source yourself:
-#
-#      # Install the MinGW cross-compiler
-#      sudo apt install mingw-w64          # Debian/Ubuntu
-#      sudo pacman -S mingw-w64-gcc        # Arch
-#      sudo dnf install mingw64-gcc        # Fedora
-#
-#      # shm_launcher.exe  (-municode is required: the entry point is wmain())
-#      x86_64-w64-mingw32-gcc -O2 -Wall -municode \
-#          -o shm_launcher.exe cluckers/tools/shm_launcher.c
-#
-#      # xinput1_3.dll
-#      x86_64-w64-mingw32-gcc -O2 -Wall -shared \
-#          -o xinput1_3.dll \
-#          cluckers/tools/xinput_remap.c \
-#          cluckers/tools/xinput1_3.def
-#
-#    Compare checksums:
-#      sha256sum shm_launcher.exe xinput1_3.dll
-#
-#    Expected SHA-256:
-#      shm_launcher.exe : e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd
-#      xinput1_3.dll    : a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24
+#    To verify you get the same bytes and review the exact source code used
+#    to build them (without needing to decode the base64), please see the
+#    "REPRODUCIBLE BUILDS" and "SOURCE CODE" sections above Step 6 (line ~1630).
+#    The source code is embedded directly in this script as comments, along
+#    with the required compiler environment details and links to the official
+#    cluckers GitHub repository.
 #
 # SOURCE REFERENCES
 #   All behaviour mirrors the cluckers Go source. Key files:
@@ -1630,15 +1613,323 @@ BLAKE3EOF
   #              cluckers/tools/xinput1_3.def
   #
   # REPRODUCIBLE BUILDS
-  #   The binaries embedded below were compiled from the source files listed
-  #   above using those exact commands. To verify the embedded binaries:
+  #   The base64 binaries embedded below were compiled using x86_64-w64-mingw32-gcc.
+  #   To reproduce the exact checksums without base64 decoding them to verify the source,
+  #   you can compile the C source code included below in the exact same environment.
   #
-  #   1. Compile from source using the commands above.
-  #   2. Compare checksums:
-  #        sha256sum shm_launcher.exe xinput1_3.dll
-  #   3. Expected:
-  #        shm_launcher.exe : e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd
-  #        xinput1_3.dll    : a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24
+  #   Compiler Environment: Ubuntu 24.04 LTS (or Debian 12)
+  #   Compiler Version:     x86_64-w64-mingw32-gcc (GCC) 13-win32 (version 13.2.0)
+  #   Commands:
+  #     x86_64-w64-mingw32-gcc -O2 -Wall -municode -o shm_launcher.exe shm_launcher.c
+  #     x86_64-w64-mingw32-gcc -O2 -Wall -shared -o xinput1_3.dll xinput_remap.c xinput1_3.def
+  #   Expected Checksums:
+  #     shm_launcher.exe : e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd
+  #     xinput1_3.dll    : a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24
+  #
+  #   Source Repository: https://github.com/0xc0re/cluckers/tree/main/tools
+  #
+  # ==============================================================================
+  # SOURCE CODE: shm_launcher.c (https://github.com/0xc0re/cluckers/blob/main/tools/shm_launcher.c)
+  # ==============================================================================
+#   /*
+#    * shm_launcher.c - Creates a named shared memory section with content bootstrap
+#    * data, then launches the game executable. The game expects to find the bootstrap
+#    * via OpenFileMapping() using the name passed in -content_bootstrap_shm=.
+#    *
+#    * Build: x86_64-w64-mingw32-gcc -o shm_launcher.exe shm_launcher.c
+#    * Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]
+#    *
+#    * The launcher:
+#    *   1. Reads bootstrap data from <bootstrap_file>
+#    *   2. Creates a named file mapping called <shm_name>
+#    *   3. Copies the bootstrap data into the mapping
+#    *   4. Launches <game_exe> with the remaining arguments
+#    *   5. Waits for the game to exit
+#    *   6. Cleans up the mapping
+#    */
+#   
+#   #include <windows.h>
+#   #include <stdio.h>
+#   
+#   int wmain(int argc, wchar_t *argv[]) {
+#       if (argc < 4) {
+#           fprintf(stderr, "Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]\n");
+#           return 1;
+#       }
+#   
+#       wchar_t *bootstrap_file = argv[1];
+#       wchar_t *shm_name = argv[2];
+#       wchar_t *game_exe = argv[3];
+#   
+#       /* Read bootstrap data from file */
+#       HANDLE hFile = CreateFileW(bootstrap_file, GENERIC_READ, FILE_SHARE_READ,
+#                                  NULL, OPEN_EXISTING, 0, NULL);
+#       if (hFile == INVALID_HANDLE_VALUE) {
+#           fprintf(stderr, "Failed to open bootstrap file (err=%lu)\n", GetLastError());
+#           return 1;
+#       }
+#   
+#       DWORD fileSize = GetFileSize(hFile, NULL);
+#       if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
+#           fprintf(stderr, "Invalid bootstrap file size (err=%lu)\n", GetLastError());
+#           CloseHandle(hFile);
+#           return 1;
+#       }
+#   
+#       BYTE *data = (BYTE *)malloc(fileSize);
+#       if (!data) {
+#           fprintf(stderr, "malloc failed\n");
+#           CloseHandle(hFile);
+#           return 1;
+#       }
+#   
+#       DWORD bytesRead;
+#       if (!ReadFile(hFile, data, fileSize, &bytesRead, NULL) || bytesRead != fileSize) {
+#           fprintf(stderr, "Failed to read bootstrap file (err=%lu)\n", GetLastError());
+#           free(data);
+#           CloseHandle(hFile);
+#           return 1;
+#       }
+#       CloseHandle(hFile);
+#   
+#       printf("[shm_launcher] Bootstrap data: %lu bytes\n", fileSize);
+#   
+#       /* Create named shared memory */
+#       HANDLE hMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+#                                            0, fileSize, shm_name);
+#       if (!hMapping) {
+#           fprintf(stderr, "CreateFileMapping failed (err=%lu)\n", GetLastError());
+#           free(data);
+#           return 1;
+#       }
+#   
+#       LPVOID pView = MapViewOfFile(hMapping, FILE_MAP_WRITE, 0, 0, fileSize);
+#       if (!pView) {
+#           fprintf(stderr, "MapViewOfFile failed (err=%lu)\n", GetLastError());
+#           CloseHandle(hMapping);
+#           free(data);
+#           return 1;
+#       }
+#   
+#       memcpy(pView, data, fileSize);
+#       free(data);
+#   
+#       printf("[shm_launcher] Shared memory '%ls' created (%lu bytes)\n", shm_name, fileSize);
+#   
+#       /* Build command line for the game */
+#       wchar_t cmdline[32768];
+#       int pos = 0;
+#   
+#       /* Quote the exe path */
+#       pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L"\"%ls\"", game_exe);
+#   
+#       /* Append remaining args */
+#       for (int i = 4; i < argc; i++) {
+#           pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L" %ls", argv[i]);
+#       }
+#   
+#       printf("[shm_launcher] Launching: %ls\n", cmdline);
+#   
+#       /* Launch the game */
+#       STARTUPINFOW si = { .cb = sizeof(si) };
+#       PROCESS_INFORMATION pi = {0};
+#   
+#       if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+#           fprintf(stderr, "CreateProcess failed (err=%lu)\n", GetLastError());
+#           UnmapViewOfFile(pView);
+#           CloseHandle(hMapping);
+#           return 1;
+#       }
+#   
+#       printf("[shm_launcher] Game started (pid=%lu), waiting...\n", pi.dwProcessId);
+#   
+#       /* Wait for game to exit */
+#       WaitForSingleObject(pi.hProcess, INFINITE);
+#   
+#       DWORD exitCode = 0;
+#       GetExitCodeProcess(pi.hProcess, &exitCode);
+#       printf("[shm_launcher] Game exited with code %lu\n", exitCode);
+#   
+#       /* Cleanup */
+#       CloseHandle(pi.hThread);
+#       CloseHandle(pi.hProcess);
+#       UnmapViewOfFile(pView);
+#       CloseHandle(hMapping);
+#   
+#       return (int)exitCode;
+#   }
+  #
+  # ==============================================================================
+  # SOURCE CODE: xinput_remap.c (https://github.com/0xc0re/cluckers/blob/main/tools/xinput_remap.c)
+  # ==============================================================================
+#   #include <windows.h>
+#   #include <stdio.h>
+#   
+#   /*
+#    * XInput index remapping proxy for UE3 games on Wine.
+#    *
+#    * Problem: UE3 reserves XInput index 0 for keyboard, polls indices 1-3.
+#    *          Wine assigns the controller to XInput index 0.
+#    * Fix:     Remap game's index N -> real index N-1.
+#    *
+#    * Tries xinput1_4, xinput9_1_0, xinput1_2, xinput1_1 as backends.
+#    */
+#   
+#   typedef DWORD (WINAPI *pfn_XInputGetState)(DWORD, void*);
+#   typedef DWORD (WINAPI *pfn_XInputGetCapabilities)(DWORD, DWORD, void*);
+#   typedef DWORD (WINAPI *pfn_XInputSetState)(DWORD, void*);
+#   typedef void  (WINAPI *pfn_XInputEnable)(BOOL);
+#   
+#   static HMODULE hReal = NULL;
+#   static pfn_XInputGetState pGetState = NULL;
+#   static pfn_XInputGetCapabilities pGetCaps = NULL;
+#   static pfn_XInputSetState pSetState = NULL;
+#   static pfn_XInputEnable pEnable = NULL;
+#   static BOOL initialized = FALSE;
+#   static CRITICAL_SECTION g_initLock;
+#   static BOOL g_lockReady = FALSE;
+#   static FILE *logf = NULL;
+#   static int n = 0;
+#   
+#   static void proxy_init(void) {
+#       if (initialized) return;
+#       if (g_lockReady) EnterCriticalSection(&g_initLock);
+#       if (initialized) { if (g_lockReady) LeaveCriticalSection(&g_initLock); return; }
+#   
+#       logf = fopen("Z:\\tmp\\xinput_remap.log", "w");
+#   
+#       /* Try multiple xinput DLL variants as backends */
+#       static const wchar_t *dlls[] = {
+#           L"xinput1_4.dll",
+#           L"xinput9_1_0.dll",
+#           L"xinput1_2.dll",
+#           L"xinput1_1.dll",
+#           NULL
+#       };
+#   
+#       for (int i = 0; dlls[i]; i++) {
+#           hReal = LoadLibraryW(dlls[i]);
+#           if (hReal) {
+#               pGetState = (pfn_XInputGetState)GetProcAddress(hReal, "XInputGetState");
+#               if (pGetState) {
+#                   /* Test if this DLL actually sees a controller at index 0 */
+#                   BYTE state[64];
+#                   ZeroMemory(state, sizeof(state));
+#                   DWORD r = pGetState(0, state);
+#                   if (logf) fprintf(logf, "REMAP: %ls loaded, GetState(0)=%lu\n", dlls[i], r);
+#                   if (r == 0) {
+#                       /* Found a working backend */
+#                       pGetCaps = (pfn_XInputGetCapabilities)GetProcAddress(hReal, "XInputGetCapabilities");
+#                       pSetState = (pfn_XInputSetState)GetProcAddress(hReal, "XInputSetState");
+#                       pEnable = (pfn_XInputEnable)GetProcAddress(hReal, "XInputEnable");
+#                       if (logf) { fprintf(logf, "REMAP: Using %ls as backend (controller at index 0)\n", dlls[i]); fflush(logf); }
+#                       break;
+#                   }
+#               }
+#               FreeLibrary(hReal);
+#               hReal = NULL;
+#               pGetState = NULL;
+#           } else {
+#               if (logf) fprintf(logf, "REMAP: Failed to load %ls (err=%lu)\n", dlls[i], GetLastError());
+#           }
+#       }
+#   
+#       if (!hReal && logf) { fprintf(logf, "REMAP: No working backend found!\n"); fflush(logf); }
+#   
+#       initialized = TRUE;
+#       if (g_lockReady) LeaveCriticalSection(&g_initLock);
+#   }
+#   
+#   /* Remap: game's 1->0, 2->1, 3->2. Index 0 stays 0. */
+#   static DWORD remap(DWORD idx) {
+#       if (idx >= 1 && idx <= 3) return idx - 1;
+#       return idx;
+#   }
+#   
+#   __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD idx, void *state) {
+#       proxy_init();
+#       if (!pGetState) return 0x48F;
+#       DWORD real_idx = remap(idx);
+#       DWORD r = pGetState(real_idx, state);
+#       n++;
+#       if (logf && r == 0 && (n <= 50 || n % 500 == 0)) {
+#           /* Log actual state data to verify controller values reach the game.
+#            * XINPUT_STATE layout: DWORD packet, WORD buttons, BYTE LT, BYTE RT,
+#            *                      SHORT LX, SHORT LY, SHORT RX, SHORT RY */
+#           BYTE *s = (BYTE*)state;
+#           WORD btns = *(WORD*)(s+4);
+#           SHORT lx = *(SHORT*)(s+8);
+#           SHORT ly = *(SHORT*)(s+10);
+#           SHORT rx = *(SHORT*)(s+12);
+#           SHORT ry = *(SHORT*)(s+14);
+#           fprintf(logf, "GetState(%lu->%lu)=%lu btns=%04X LX=%d LY=%d RX=%d RY=%d [#%d]\n",
+#                   idx, real_idx, r, btns, lx, ly, rx, ry, n);
+#           fflush(logf);
+#       }
+#       return r;
+#   }
+#   
+#   __declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD idx, DWORD flags, void *caps) {
+#       proxy_init();
+#       if (!pGetCaps) return 0x48F;
+#       return pGetCaps(remap(idx), flags, caps);
+#   }
+#   
+#   __declspec(dllexport) DWORD WINAPI XInputSetState(DWORD idx, void *vib) {
+#       proxy_init();
+#       if (!pSetState) return 0x48F;
+#       return pSetState(remap(idx), vib);
+#   }
+#   
+#   /*
+#    * XInputEnable(FALSE) no-op:
+#    * UE3 calls XInputEnable(FALSE) on WM_ACTIVATEAPP when the window loses focus
+#    * during ServerTravel map transitions (lobby -> match). Wine's compliant
+#    * implementation zeros all XInput state data, causing invisible controller
+#    * input loss for the entire match. This is the same pattern fixed in Proton
+#    * 8.0-4 for Overwatch 2. We block FALSE to prevent disabling, but forward
+#    * TRUE (harmless, keeps state consistent).
+#    */
+#   __declspec(dllexport) void WINAPI XInputEnable(BOOL e) {
+#       proxy_init();
+#       if (logf) { fprintf(logf, "XInputEnable(%d) called at n=%d\n", e, n); fflush(logf); }
+#       if (e == FALSE) {
+#           if (logf) { fprintf(logf, "BLOCKED XInputEnable(FALSE) - preventing UE3 ServerTravel input loss\n"); fflush(logf); }
+#           return;
+#       }
+#       if (pEnable) pEnable(e);
+#   }
+#   
+#   __declspec(dllexport) DWORD WINAPI XInputGetStateEx(DWORD idx, void *state) {
+#       return XInputGetState(idx, state);
+#   }
+#   
+#   BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID res) {
+#       (void)h; (void)res;
+#       /* Do NOT call proxy_init here - LoadLibrary inside DllMain causes loader lock deadlock */
+#       if (reason == 1) {
+#           /* DLL_PROCESS_ATTACH: initialize critical section for thread-safe proxy_init */
+#           InitializeCriticalSection(&g_initLock);
+#           g_lockReady = TRUE;
+#       }
+#       if (reason == 0) {
+#           /* DLL_PROCESS_DETACH: clean up */
+#           if (logf) { fprintf(logf, "REMAP: unloading after %d calls\n", n); fclose(logf); }
+#           if (g_lockReady) { DeleteCriticalSection(&g_initLock); g_lockReady = FALSE; }
+#       }
+#       return TRUE;
+#   }
+  #
+  # ==============================================================================
+  # SOURCE CODE: xinput1_3.def  (https://github.com/0xc0re/cluckers/blob/main/tools/xinput1_3.def)
+  # ==============================================================================
+#   LIBRARY xinput1_3
+#   EXPORTS
+#       XInputGetState @2
+#       XInputSetState @3
+#       XInputGetCapabilities @4
+#       XInputEnable @5
+#       XInputGetStateEx @100 NONAME
   # --------------------------------------------------------------------------
   step_msg "Step 6 — Installing helper binaries..."
 
