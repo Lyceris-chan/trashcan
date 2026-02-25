@@ -13,12 +13,13 @@
 #    ./cluckers-setup.sh --verbose       # show full Wine debug output
 #    ./cluckers-setup.sh --no-gamescope  # skip Gamescope compositor  (-g)
 #    ./cluckers-setup.sh --steam-deck    # apply Steam Deck patches    (-d)
+#    ./cluckers-setup.sh --controller    # enable controller support   (-c)
 #    ./cluckers-setup.sh --update        # check for game update       (-U)
 #    ./cluckers-setup.sh --uninstall     # remove everything           (-u)
 #
 #  SHORT FLAGS
 #    -a  auto      -v  verbose      -g  no-gamescope      -d  steam-deck
-#    -U  update    -u  uninstall
+#    -c  controller -U  update    -u  uninstall
 #
 #  UPDATE FLAG
 #    --update / -U checks the update server for a newer game version. Update
@@ -637,8 +638,10 @@ PYEOF
 #   GAME_DIR, UPDATER_URL, GAME_VERSION
 # Arguments:
 #   $1 - steam_deck_flag: "true" | "false"
+#   $2 - controller_flag: "true" | "false"
 run_update() {
   local -r steam_deck_flag="$1"
+  local -r controller_flag="$2"
 
   printf "\n"
   printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
@@ -739,9 +742,9 @@ DATBLAKE3EOF
 
   if [[ "${needs_update}" == "false" ]]; then
     ok_msg "Game is already up to date (${target_version})."
-    if [[ "${steam_deck_flag}" == "true" ]]; then
-      step_msg "Applying Steam Deck patches..."
-      apply_deck_patches "${GAME_DIR}"
+    if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
+      step_msg "Applying game patches..."
+      apply_game_patches "${GAME_DIR}" "${steam_deck_flag}" "${controller_flag}"
     fi
     printf "\n"
     printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
@@ -819,10 +822,10 @@ ZIPBLAKE3EOF
   rm -f "${zip_path}"
   ok_msg "Game updated to ${target_version}."
 
-  # ---- Optional Deck patches -------------------------------------------------
-  if [[ "${steam_deck_flag}" == "true" ]]; then
-    step_msg "Applying Steam Deck patches..."
-    apply_deck_patches "${GAME_DIR}"
+  # ---- Optional game patches -------------------------------------------------
+  if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
+    step_msg "Applying game patches..."
+    apply_game_patches "${GAME_DIR}" "${steam_deck_flag}" "${controller_flag}"
   fi
 
   printf "\n"
@@ -858,25 +861,36 @@ is_steam_deck() {
   return 1
 }
 
-# Applies Steam Deck display + input patches and deploys the controller layout.
+# Applies game patches (display, input, layout) for Steam Deck or generic controllers.
 # Mirrors PatchDeckConfig() in cluckers/internal/launch/deckconfig.go.
 #
 # Patches applied:
-#   RealmSystemSettings.ini  — forces fullscreen at 1280x800.
+#   RealmSystemSettings.ini  — forces fullscreen at 1280x800 (Deck only).
 #   DefaultInput.ini / RealmInput.ini — removes phantom mouse-axis counters
 #     (Count bXAxis / Count bYAxis) to prevent the controller from switching
 #     to keyboard/mouse mode under Wine.
-#   controller_neptune_config.vdf — Steam Deck button layout (best-effort).
+#   controller_neptune_config.vdf — Steam Deck button layout (best-effort, Deck only).
 #
 # Arguments:
 #   $1 - game_dir: absolute path to the game data directory (GAME_DIR).
-apply_deck_patches() {
+#   $2 - steam_deck_flag: "true" | "false"
+#   $3 - controller_flag: "true" | "false"
+apply_game_patches() {
   local game_dir="$1"
+  local -r steam_deck_flag="$2"
+  local -r controller_flag="$3"
   local config_dir="${game_dir}/Realm-Royale/RealmGame/Config"
   local engine_config_dir="${game_dir}/Realm-Royale/Engine/Config"
   local ini
 
-  # -- Display: force fullscreen 1280x800 ------------------------------------
+  # Remember preference if controller support was requested.
+  if [[ "${controller_flag}" == "true" ]]; then
+    mkdir -p "${game_dir}"
+    touch "${game_dir}/.controller_enabled"
+  fi
+
+  # -- Display: force fullscreen 1280x800 (Steam Deck only) ------------------
+  if [[ "${steam_deck_flag}" == "true" ]]; then
   ini="${config_dir}/RealmSystemSettings.ini"
   if [[ -f "${ini}" ]]; then
     chmod u+w "${ini}"
@@ -896,17 +910,17 @@ patches = [
 for old, new in patches:
     txt = txt.replace(old, new)
 
-with open(path, "w", encoding="utf-8") as f:
-    f.write(txt)
-print("  Patched RealmSystemSettings.ini (1280x800 fullscreen)")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(txt)
+    print("  Patched RealmSystemSettings.ini (1280x800 fullscreen)")
 DECK_DISPLAY_EOF
-  else
-    warn_msg "RealmSystemSettings.ini not found — display patch skipped."
-    warn_msg "  (Run setup again after downloading the game.)"
+    else
+      warn_msg "RealmSystemSettings.ini not found — display patch skipped."
+      warn_msg "  (Run setup again after downloading the game.)"
+    fi
   fi
 
-  # -- Input: remove phantom mouse-axis counters -----------------------------
-  # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
+  # -- Input: remove phantom mouse-axis counters (Deck or Controller mode) ---  # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
   # gamepad to KB/M mode whenever phantom mouse events arrive under Wine.
   # Source: deckconfig.go — PatchDeckInputConfig(), deckInputPatches var.
   for ini in \
@@ -976,13 +990,14 @@ DECK_INPUT_EOF
   # Make all INI files writable so the game can save user controller preferences.
   chmod u+w "${config_dir}"/*.ini 2>/dev/null || true
 
-  # -- Controller layout: deploy controller_neptune_config.vdf ---------------
-  # Best-effort: deploy to every Steam userdata account directory found.
-  # Preserves any existing user-customised layout (never overwrites).
-  # Source: deckconfig.go — deployDeckControllerLayout().
-  local vdf_tmp
-  vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX.vdf)
-  base64 -d << 'NEPTUNE_B64_EOF' > "${vdf_tmp}"
+  # -- Controller layout: deploy controller_neptune_config.vdf (Deck only) ----
+  if [[ "${steam_deck_flag}" == "true" ]]; then
+    # Best-effort: deploy to every Steam userdata account directory found.
+    # Preserves any existing user-customised layout (never overwrites).
+    # Source: deckconfig.go — deployDeckControllerLayout().
+    local vdf_tmp
+    vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX.vdf)
+    base64 -d << 'NEPTUNE_B64_EOF' > "${vdf_tmp}"
 ImNvbnRyb2xsZXJfbWFwcGluZ3MiCnsKCSJ2ZXJzaW9uIiAiMyIKCSJnYW1lIiAiUmVhbG0gUm95
 YWxlIChDbHVja2VycykiCgkidGl0bGUiICIjVGl0bGUiCgkiZGVzY3JpcHRpb24iICIjRGVzY3Jp
 cHRpb24iCgkiY29udHJvbGxlcl90eXBlIgkJImNvbnRyb2xsZXJfbmVwdHVuZSIKCSJtYWpvcl9y
@@ -1165,14 +1180,15 @@ for uid in os.listdir(userdata):
     print(f"  Deployed controller layout for uid {uid} (appid {app_id}).")
     deployed += 1
 
-if deployed == 0 and app_id is None:
-    print("  Cluckers shortcut not found in Steam — add it first (Step 14).")
+    if deployed == 0 and app_id is None:
+        print("  Cluckers shortcut not found in Steam — add it first (Step 14).")
 DECK_LAYOUT_EOF
 
-  rm -f "${vdf_tmp}"
-  ok_msg "Steam Deck patches applied."
-}
+    rm -f "${vdf_tmp}"
+  fi
 
+  ok_msg "Game patches applied."
+}
 # Locates the newest Proton-GE installation or falls back to system Wine.
 # Matches FindWine() logic in internal/wine/detect.go.
 #
@@ -1268,9 +1284,17 @@ main() {
   local auto_mode="false"
   local no_gamescope="false"
   local steam_deck="false"
+  local controller_mode="false"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
+
+  # Load saved preferences.
+  local controller_pref_file="${GAME_DIR}/.controller_enabled"
+  if [[ -f "${controller_pref_file}" ]]; then
+    controller_mode="true"
+  fi
+
   # Detected once early — available for Step 4 (DXVK decision) and
   # Step 8 (launcher creation). find_wine sets all three by nameref.
   local _is_proton="false"
@@ -1285,13 +1309,14 @@ main() {
       --verbose|-v)      verbose="true" ;;
       --auto|-a)         auto_mode="true" ;;
       --no-gamescope|-g) no_gamescope="true" ;;
-      --steam-deck|-d)   steam_deck="true"; no_gamescope="true" ;;
+      --steam-deck|-d)   steam_deck="true"; no_gamescope="true"; controller_mode="true" ;;
+      --controller|-c)   controller_mode="true" ;;
       *) ;;
     esac
   done
 
   if [[ "${do_update}" == "true" ]]; then
-    run_update "${steam_deck}"
+    run_update "${steam_deck}" "${controller_mode}"
     exit 0
   fi
 
@@ -11317,8 +11342,8 @@ XDLL_B64_EOF
   #                           LAUNCH TIME when the generated script runs.
   #
   # Environment variables set in the launcher (from internal/launch/process_linux.go):
-  #   WINEFSYNC=1  — enables futex-based sync in Proton (baked at setup time).
-  # --------------------------------------------------------------------------
+  #   WINE_NTSYNC=1 — enables NT sync primitives (modern kernel, baked at setup).
+  #   WINEFSYNC=1   — enables futex-based sync (fallback, baked at setup time).  # --------------------------------------------------------------------------
   step_msg "Step 8 — Creating launcher script..."
 
   # Wine/Proton was detected upfront in main() before Step 3.
@@ -11327,7 +11352,14 @@ XDLL_B64_EOF
     error_exit "No Proton found. Install a Proton build via Steam or ProtonUp-Qt."
   ok_msg "Wine binary (Proton): ${real_wine_path}"
   ok_msg "Proton compat tool name: ${_proton_tool_name}"
-  ok_msg "WINEFSYNC=1 will be set in the launcher."
+  # Sync primitives: ntsync (modern) or fsync (standard GE-Proton).
+  if [[ "${real_wine_path}" == *"GE-Proton"* ]]; then
+    if [[ -c /dev/ntsync ]]; then
+      ok_msg "WINE_NTSYNC=1 will be set in the launcher (compatible kernel found)."
+    else
+      ok_msg "WINEFSYNC=1 will be set in the launcher."
+    fi
+  fi
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
 
@@ -11354,13 +11386,17 @@ export WINEDLLOVERRIDES="dxgi=n"
 # Source: cluckers/internal/wine/detect.go (FindWine)
 WINE="${real_wine_path}"
 
-# WINEFSYNC=1: futex-based sync. Only set when the detected Wine binary is
-# a GE-Proton build — mirrors wine.IsProtonGE() in internal/wine/detect.go
-# which checks for "GE-Proton" in the path. Other Proton/Wine builds do not
-# reliably support WINEFSYNC.
-# Source: internal/launch/process_linux.go
+# Sync primitives: ntsync (modern) or fsync (standard GE-Proton).
+# Only set when using a GE-Proton build.
 $(if [[ "${real_wine_path}" == *"GE-Proton"* ]]; then
-  printf 'export WINEFSYNC=1\n'
+  # Use ntsync if /dev/ntsync exists (compatible kernel). 
+  # Otherwise fall back to fsync (available in all GE-Proton builds).
+  # If you experience EAC kicks, try swapping WINE_NTSYNC for WINEFSYNC.
+  if [[ -c /dev/ntsync ]]; then
+    printf 'export WINE_NTSYNC=1\n'
+  else
+    printf 'export WINEFSYNC=1\n'
+  fi
 fi)
 
 GAME_DIR="${GAME_DIR}"
@@ -11824,51 +11860,31 @@ PYEOF
   # --------------------------------------------------------------------------
   printf "\n"
   # --------------------------------------------------------------------------
-  # Step 11 — Steam Deck patches (--steam-deck / -d only)
+  # Step 11 — Game patches (Steam Deck or Controller mode)
   #
-  # Only runs when --steam-deck / -d is passed. Applies three patches that
-  # mirror what the native cluckers launcher does via PatchDeckConfig() in
-  # internal/launch/deckconfig.go:
+  # Applies patches that mirror what the native cluckers launcher does via
+  # PatchDeckConfig() in internal/launch/deckconfig.go:
   #
-  #   1. RealmSystemSettings.ini — force fullscreen at 1280×800 (the Deck's
-  #      native resolution). Without this the game renders at 1920×1080 and
-  #      is letterboxed or blurry.
+  #   1. RealmSystemSettings.ini — force fullscreen at 1280×800 (Steam Deck only).
   #
   #   2. DefaultInput.ini / RealmInput.ini / BaseInput.ini — remove "Count
-  #      bXAxis" and "Count bYAxis" from mouse bindings. These counters make
-  #      UE3 switch input mode from gamepad to keyboard/mouse whenever Wine
-  #      or the Deck's touch screen generates a phantom mouse event. This patch
-  #      prevents the controller from switching to KB/M mode.
+  #      bXAxis" and "Count bYAxis" from mouse bindings. This prevents the
+  #      controller from switching to KB/M mode under Wine.
   #
   #   3. controller_neptune_config.vdf — deploy the custom Steam Deck button
-  #      layout (embedded in this script from cluckers/assets/). Skips if a
-  #      layout already exists (preserves user customisations). Requires the
-  #      Cluckers Central Steam shortcut to exist (created in Step 14).
+  #      layout (Steam Deck only).
   #
   # Safe to run multiple times — all patches are idempotent.
-  #
-  # RE-RUN BEHAVIOUR
-  # Re-running with --steam-deck / -d is the intended way to apply (or
-  # re-apply) Deck patches without reinstalling. All Steps 1-14 have
-  # idempotent skip-guards:
-  #   • Wine prefix already exists    → Step 3 skips wineboot
-  #   • winetricks log present        → Step 4 skips each already-installed pkg
-  #   • Game exe present              → Step 5 skips the 5.3 GB download
-  #   • Tools already extracted       → Step 6 skips binary extraction
-  #   • Icon already extracted        → Step 7 skips icon extraction
-  #   • Launcher script present       → Step 8 skips launcher creation
-  #   • Deck INIs already patched     → Step 11 patches report "already patched"
-  # A re-run with -d on an installed system therefore completes in seconds.
   # --------------------------------------------------------------------------
-  if [[ "${steam_deck}" == "true" ]]; then
-    step_msg "Step 11 — Applying Steam Deck patches..."
+  if [[ "${steam_deck}" == "true" || "${controller_mode}" == "true" ]]; then
+    step_msg "Step 11 — Applying game patches..."
 
-    if ! is_steam_deck; then
+    if [[ "${steam_deck}" == "true" ]] && ! is_steam_deck; then
       warn_msg "Steam Deck hardware not detected (board_vendor != Valve)."
       warn_msg "Applying patches anyway as --steam-deck / -d was passed."
     fi
 
-    apply_deck_patches "${GAME_DIR}"
+    apply_game_patches "${GAME_DIR}" "${steam_deck}" "${controller_mode}"
   fi
 
   printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
