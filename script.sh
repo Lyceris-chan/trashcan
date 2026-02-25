@@ -1475,20 +1475,12 @@ main() {
 
   # Python libraries used by this script:
   #   vdf      — reads/writes Steam's binary config files (shortcuts.vdf etc.)
-  #   requests — used by the gateway proxy to forward auth requests
   if ! python3 -c "import vdf" > /dev/null 2>&1; then
     info_msg "Installing Python 'vdf' library..."
     python3 -m pip install --quiet --break-system-packages vdf 2>/dev/null \
       || python3 -m pip install --quiet --user vdf \
       || error_exit "Could not install the Python 'vdf' library."
     ok_msg "Python 'vdf' installed."
-  fi
-
-  if ! python3 -c "import requests" > /dev/null 2>&1; then
-    info_msg "Installing Python 'requests' (used by the gateway proxy)..."
-    python3 -m pip install --quiet --break-system-packages requests 2>/dev/null \
-      || python3 -m pip install --quiet --user requests \
-      || warn_msg "Could not install 'requests' — the proxy may not work."
   fi
 
   # --------------------------------------------------------------------------
@@ -1668,7 +1660,7 @@ main() {
     if [[ -n "${zip_blake3}" ]]; then
       info_msg "Verifying BLAKE3 integrity of game zip..."
       local actual_blake3
-      actual_blake3=$(python3 - << 'BLAKE3EOF'
+      actual_blake3=$(python3 - "${zip_path}" << 'BLAKE3EOF'
 import sys
 try:
     from blake3 import blake3 as b3
