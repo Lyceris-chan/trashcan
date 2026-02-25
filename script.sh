@@ -1305,6 +1305,8 @@ find_wine() {
 
   local search_dirs=(
     "/usr/share/steam/compatibilitytools.d"
+    "/opt/proton-cachyos"
+    "/opt/proton-cachyos-slr"
     "${HOME}/.steam/root/compatibilitytools.d"
     "${HOME}/.steam/steam/compatibilitytools.d"
     "${HOME}/.local/share/Steam/compatibilitytools.d"
@@ -1312,6 +1314,8 @@ find_wine() {
     "${HOME}/snap/steam/common/.steam/steam/compatibilitytools.d"
     "${HOME}/.var/app/net.davidotek.pupgui2/data/Steam/compatibilitytools.d"
     "${HOME}/.local/share/Steam/steamapps/common/Proton - GE/compatibilitytools.d"
+    "${HOME}/.local/share/lutris/runners/wine"
+    "${HOME}/.local/share/bottles/runners"
   )
 
   if [[ -L "${HOME}/.steam/root" ]]; then
@@ -1328,18 +1332,24 @@ find_wine() {
   for d in "${search_dirs[@]}"; do
     if [[ ! -d "${d}" ]]; then continue; fi
 
-    if [[ -f "${d}/proton-ge-custom/files/bin/wine64" ]]; then
-      if [[ -z "${newest_proton}" || "00000-00000" > "${newest_version}" ]]; then
-        newest_proton="${d}/proton-ge-custom/files/bin/wine64"
-        newest_version="00000-00000"
-      fi
+    # 1. Check direct subdirectory (e.g., /opt/proton-cachyos/files/bin/wine64)
+    # or Lutris runners (e.g., .../lutris-ge-6.16-x86_64/bin/wine64)
+    if [[ -f "${d}/files/bin/wine64" ]]; then
+        if [[ -z "${newest_proton}" ]]; then
+            newest_proton="${d}/files/bin/wine64"
+        fi
+    elif [[ -f "${d}/bin/wine64" ]]; then
+        if [[ -z "${newest_proton}" ]]; then
+            newest_proton="${d}/bin/wine64"
+        fi
     fi
 
-    # Check for versioned GE-Proton*
-    # shellcheck disable=SC2044,SC2231
-    for p in "${d}"/GE-Proton*; do
+    # 2. Check for common Proton and custom Wine prefixes
+    # Use a broad glob to find GE-Proton, proton-cachyos, lutris-ge, etc.
+    for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
       if [[ -f "${p}/files/bin/wine64" ]]; then
         base=$(basename "${p}")
+        # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
         if [[ "${base}" =~ GE-Proton([0-9]+)-([0-9]+) ]]; then
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
@@ -1348,6 +1358,14 @@ find_wine() {
             newest_version="${ver}"
             newest_proton="${p}/files/bin/wine64"
           fi
+        elif [[ -z "${newest_proton}" ]]; then
+          # Fallback for other Protons without standard GE versioning
+          newest_proton="${p}/files/bin/wine64"
+        fi
+      elif [[ -f "${p}/bin/wine64" ]]; then
+        # Handle versions that don't use 'files' subfolder (e.g. some Lutris/Bottles runners)
+        if [[ -z "${newest_proton}" ]]; then
+          newest_proton="${p}/bin/wine64"
         fi
       fi
     done
@@ -1356,25 +1374,47 @@ find_wine() {
   if [[ -n "${newest_proton}" ]] && [[ -x "${newest_proton}" ]]; then
     _out_path="${newest_proton}"
     _out_is_proton="true"
-    _out_tool_name=$(basename "$(dirname "$(dirname "$(dirname "${newest_proton}")")")")
+    # Extract a meaningful tool name (e.g., GE-Proton9-20 or proton-cachyos)
+    # If path is .../ToolName/files/bin/wine64, name is ToolName.
+    # If path is .../ToolName/bin/wine64, name is ToolName.
+    local tool_dir
+    tool_dir=$(dirname "$(dirname "${newest_proton}")")
+    if [[ "$(basename "${tool_dir}")" == "bin" ]]; then
+        tool_dir=$(dirname "${tool_dir}")
+    fi
+    if [[ "$(basename "${tool_dir}")" == "files" ]]; then
+        tool_dir=$(dirname "${tool_dir}")
+    fi
+    _out_tool_name=$(basename "${tool_dir}")
     return 0
   fi
 
-  if command -v wine64 >/dev/null 2>&1; then
-    _out_path=$(command -v wine64)
-    if [[ -x "${_out_path}" ]]; then
+  # Check for system Wine and side-by-side installs
+  local wine_candidates=(
+    "wine64"
+    "wine"
+    "/opt/wine-cachyos/bin/wine64"
+    "/opt/wine-cachyos/bin/wine"
+    "/opt/wine-staging/bin/wine64"
+    "/opt/wine-staging/bin/wine"
+    "/usr/lib/wine/wine64"
+    "/usr/lib/wine/wine"
+  )
+
+  local candidate path
+  for candidate in "${wine_candidates[@]}"; do
+    if [[ "${candidate}" == /* ]]; then
+      path="${candidate}"
+    else
+      path=$(command -v "${candidate}" 2>/dev/null || true)
+    fi
+
+    if [[ -n "${path}" ]] && [[ -x "${path}" ]]; then
+      _out_path="${path}"
       _out_tool_name="wine"
       return 0
     fi
-  fi
-  
-  if command -v wine >/dev/null 2>&1; then
-    _out_path=$(command -v wine)
-    if [[ -x "${_out_path}" ]]; then
-      _out_tool_name="wine"
-      return 0
-    fi
-  fi
+  done
 
   return 1
 }
