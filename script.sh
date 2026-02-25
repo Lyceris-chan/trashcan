@@ -11140,19 +11140,29 @@ _auth_token=$(printf '%s'    "${_auth_result}" | sed -n '2p')
 _auth_oidc=$(printf '%s'     "${_auth_result}" | sed -n '3p')
 _auth_bootstrap=$(printf '%s' "${_auth_result}" | sed -n '4p')
 
-# Write OIDC token to a temp file; game reads it via -eac_oidc_token_file.
+# Temp files for OIDC token and bootstrap blob.
 _oidc_tmp=$(mktemp /tmp/cluckers_oidc_XXXXXX)
-printf '%s' "${_auth_oidc}" > "${_oidc_tmp}"
-# Convert Linux path to Windows path for Wine (e.g. /tmp/x -> Z:\tmp\x).
-_oidc_wine=$(printf '%s' "${_oidc_tmp}" | sed 's|/|\\|g; s|^|Z:|')
+_bootstrap_tmp=$(mktemp /tmp/cluckers_bootstrap_XXXXXX)
 
+# Write OIDC token; game reads it via -eac_oidc_token_file.
+printf '%s' "${_auth_oidc}" > "${_oidc_tmp}"
+
+# Decode and write bootstrap blob (base64 → 136-byte binary file).
+# shm_launcher.exe reads this file and maps it into shared memory.
+if [[ -n "${_auth_bootstrap}" ]]; then
+  printf '%s' "${_auth_bootstrap}" | base64 -d > "${_bootstrap_tmp}"
+fi
+
+# Convert Linux paths to Windows paths for Wine (Z: maps to /).
+_oidc_wine=$(printf '%s' "${_oidc_tmp}" | sed 's|/|\\|g; s|^|Z:|')
+_bootstrap_wine=$(printf '%s' "${_bootstrap_tmp}" | sed 's|/|\\|g; s|^|Z:|')
 _game_exe="${GAME_DIR}/${GAME_EXE_REL}"
 _game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
 
-# Shared-memory name - unique per session PID.
+# Shared-memory name — unique per session PID.
 _shm_name="Local\\realm_content_bootstrap_$$"
 
-# Game launch arguments - matches gameArgs in internal/launch/process_linux.go.
+# Game launch arguments — matches gameArgs in internal/launch/process_linux.go.
 _game_args=(
   "-user=${_auth_username}"
   "-token=${_auth_token}"
@@ -11166,27 +11176,19 @@ _game_args=(
 )
 
 # Cleanup: kill gamescope and wineserver when the game exits, regardless of
-# how it exits (normal close, crash, or signal). This prevents orphaned
-# gamescope/wineserver processes lingering after the game window is closed.
+# how it exits (normal close, crash, or signal).
 _GS_PID=""
 _cleanup() {
-  # Remove temp files.
   rm -f "${_oidc_tmp}" "${_bootstrap_tmp}" 2>/dev/null || true
-  # Kill gamescope if we started it.
   if [[ -n "${_GS_PID}" ]]; then
     kill "${_GS_PID}" 2>/dev/null || true
     wait "${_GS_PID}" 2>/dev/null || true
   fi
-  # Shut down the Wine server for this prefix so no Wine processes linger.
   wineserver -k 2>/dev/null || true
 }
 trap _cleanup EXIT INT TERM
 
 # ---- Launch ---------------------------------------------------------------
-_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
-_game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
-_bootstrap_wine=$(printf '%s' "${_bootstrap_tmp}" | sed 's|/|\\|g; s|^|Z:|')
-_oidc_wine=$(printf '%s' "${_oidc_tmp}" | sed 's|/|\\|g; s|^|Z:|')
 
 if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
