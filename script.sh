@@ -11614,12 +11614,15 @@ export WINEDEBUG="-all"
 # dxgi=n,b: Source: internal/launch/process_linux.go env append WINEDLLOVERRIDES
 # https://github.com/Lyceris-chan/cluckers/blob/main/internal/launch/process_linux.go
 # xinput1_3=n: Use our custom remapper from Step 6.
-export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"
-
-# Controller detection: Source: Hi-Rez community fixes for Linux.
-# Disabling SDL HIDAPI prevents double-detection and camera spin bugs.
-export SDL_JOYSTICK_HIDAPI=0
-export SDL_JOYSTICK_HIDAPI_PS5=0
+$(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
+  printf 'export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"\n'
+  # Controller detection: Source: Hi-Rez community fixes for Linux.
+  # Disabling SDL HIDAPI prevents double-detection and camera spin bugs.
+  printf 'export SDL_JOYSTICK_HIDAPI=0\n'
+  printf 'export SDL_JOYSTICK_HIDAPI_PS5=0\n'
+else
+  printf 'export WINEDLLOVERRIDES="dxgi=n"\n'
+fi)
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
