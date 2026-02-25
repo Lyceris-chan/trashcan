@@ -1336,7 +1336,7 @@ main() {
 
   # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
   # Step 8 (launcher). find_wine writes to the three nameref variables.
-  find_wine real_wine_path _is_proton _proton_tool_name
+  find_wine real_wine_path _is_proton _proton_tool_name || true
 
   # --------------------------------------------------------------------------
   # Step 1 — System tools
