@@ -257,7 +257,7 @@ install_sys_deps() {
     command_exists "${tool}" || to_install+=("${tool}")
   done
   
-  # Explicitly check for pip3.
+  # Explicitly check for pip / pip3.
   if ! command_exists pip && ! command_exists pip3; then
     case "${pkg_mgr}" in
       apt)    to_install+=("python3-pip") ;;
@@ -1499,19 +1499,24 @@ main() {
   #   blake3   — computes hashes for game file integrity verification
   
   # Ensure pip is available.
-  local pip_cmd="pip"
-  if ! command_exists pip; then
-    if command_exists pip3; then
-      pip_cmd="pip3"
-    else
-      info_msg "Python 'pip' module not found. Attempting to install..."
-      python3 -m ensurepip --user > /dev/null 2>&1 || true
-      if python3 -m pip --version > /dev/null 2>&1; then
-        pip_cmd="python3 -m pip"
-      else
-        warn_msg "Could not find pip. Python library installation may fail."
-      fi
+  local pip_cmd=""
+  if command_exists pip; then
+    pip_cmd="pip"
+  elif command_exists pip3; then
+    pip_cmd="pip3"
+  elif python3 -m pip --version > /dev/null 2>&1; then
+    pip_cmd="python3 -m pip"
+  else
+    info_msg "Python 'pip' module not found. Attempting to install via ensurepip..."
+    python3 -m ensurepip --user > /dev/null 2>&1 || true
+    if python3 -m pip --version > /dev/null 2>&1; then
+      pip_cmd="python3 -m pip"
     fi
+  fi
+
+  if [[ -z "${pip_cmd}" ]]; then
+    warn_msg "Could not find pip or pip3. Python library installation will likely fail."
+    pip_cmd="pip" # Fallback to 'pip' and hope for the best
   fi
 
   local -a py_libs=(vdf blake3)
