@@ -1182,8 +1182,12 @@ main() {
   local final_gamescope_opts="${GAMESCOPE_ARGS}"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
-
   local do_update="false"
+  # Detected once early — available for Step 4 (DXVK decision) and
+  # Step 8 (launcher creation). find_wine sets all three by nameref.
+  local _is_proton="false"
+  local real_wine_path=""
+  local _proton_tool_name="proton"
 
   local arg
   for arg in "$@"; do
@@ -1224,6 +1228,10 @@ main() {
   printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
   printf "%b║        Cluckers Central — Linux Setup Script         ║%b\n" "${GREEN}" "${NC}"
   printf "%b╚══════════════════════════════════════════════════════╝%b\n\n" "${GREEN}" "${NC}"
+
+  # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
+  # Step 8 (launcher). find_wine writes to the three nameref variables.
+  find_wine real_wine_path _is_proton _proton_tool_name
 
   # --------------------------------------------------------------------------
   # Step 1 — System tools
@@ -1376,8 +1384,15 @@ main() {
   # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
   # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
   install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable"
-  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed Direct3D 9/10/11)"
   install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)"
+  # DXVK is only installed via winetricks when using system Wine. Proton
+  # bundles its own DXVK internally — installing a second copy via winetricks
+  # breaks Proton's DLL override chain and causes STATUS_DLL_NOT_FOUND.
+  if [[ "${_is_proton}" == "false" ]]; then
+    install_winetricks_pkg "dxvk"     "DXVK (Vulkan-backed Direct3D 9/10/11)"
+  else
+    ok_msg "Proton detected — skipping winetricks DXVK (Proton bundles its own)."
+  fi
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
@@ -10887,65 +10902,22 @@ XDLL_B64_EOF
   #                           LAUNCH TIME when the generated script runs.
   #
   # Environment variables set in the launcher (from internal/launch/process_linux.go):
-  #   WINEFSYNC=1  — enables futex-based sync in Proton-GE (baked at setup time).
+  #   WINEFSYNC=1  — enables futex-based sync in Proton (baked at setup time).
   # --------------------------------------------------------------------------
   step_msg "Step 8 — Creating launcher script..."
 
-# Mirrors FindWine() in cluckers/internal/wine/detect.go.
-  # Search all Proton installations newest-first, then fall back to system wine.
-  # Looks in both compatibilitytools.d (custom Proton) and
-  # steamapps/common (official Proton releases), matching detect.go exactly.
-  local real_wine_path=""
-  local _is_proton="false"
-  local _proton_search_dirs=(
-    "/usr/share/steam/compatibilitytools.d"
-    "${HOME}/.steam/steam/compatibilitytools.d"
-    "${HOME}/.local/share/Steam/compatibilitytools.d"
-    "${HOME}/.steam/steam/steamapps/common"
-    "${HOME}/.local/share/Steam/steamapps/common"
-  )
-  local _pdir _candidate
-  for _pdir in "${_proton_search_dirs[@]}"; do
-    [[ -d "${_pdir}" ]] || continue
-    # Pick the most-recently-modified Proton wine binary (any Proton variant).
-    _candidate=$(
-      find "${_pdir}" -maxdepth 4 -name "wine" \
-        -path "*/bin/wine" 2>/dev/null \
-        | while IFS= read -r _w; do
-            printf '%s %s\n' "$(stat -c %Y "${_w}" 2>/dev/null || echo 0)" "${_w}"
-          done \
-        | sort -rn | awk 'NR==1 {print $2}'
-    )
-    if [[ -x "${_candidate}" ]]; then
-      real_wine_path="${_candidate}"
-      _is_proton="true"
-      break
-    fi
-  done
-  # Fall back to system wine if no Proton installation was found.
-  # wine-cachyos, wine-staging, wine-tkg etc. all install to /usr/bin/wine.
-  # We detect enhanced builds by inspecting the version string — they include
-  # fsync support and benefit from WINEFSYNC=1.
-  if [[ -z "${real_wine_path}" ]]; then
-    real_wine_path=$(command -v wine 2>/dev/null) \
-      || error_exit "No Wine or Proton found. Install wine or Steam + Proton."
-    local _wine_ver=""
-    _wine_ver=$("${real_wine_path}" --version 2>/dev/null || true)
-    if [[ "${_wine_ver}" == *"CachyOS"* ]] \
-      || [[ "${_wine_ver}" == *"staging"* ]] \
-      || [[ "${_wine_ver}" == *"tkg"* ]] \
-      || [[ "${_wine_ver}" == *"Proton"* ]]; then
-      _is_proton="true"
-    fi
-  fi
-
+  # Wine/Proton was detected upfront in main() before Step 3.
+  # real_wine_path, _is_proton, and _proton_tool_name are already set.
+  [[ -z "${real_wine_path}" ]] && \
+    error_exit "No Wine or Proton found. Install wine or Steam + Proton."
   if [[ "${_is_proton}" == "true" ]]; then
     ok_msg "Wine binary (Proton): ${real_wine_path}"
+    ok_msg "Proton compat tool name: ${_proton_tool_name}"
     ok_msg "WINEFSYNC=1 will be set in the launcher."
   else
     ok_msg "Wine binary (system): ${real_wine_path}"
-    info_msg "No Proton installation found — using system Wine."
-    info_msg "For best performance, install a Proton version via Steam or ProtonUp-Qt."
+    info_msg "No Proton found — using system Wine."
+    info_msg "For best performance, install a Proton build via Steam or ProtonUp-Qt."
   fi
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
@@ -10962,10 +10934,13 @@ export WINEARCH="win64"
 # Suppress noisy Wine debug output. Set to "" to see full Wine diagnostics.
 export WINEDEBUG="-all"
 
-# DXVK requires WINEDLLOVERRIDES to prefer native (n) over built-in (b) DLLs.
-# Without this, Wine loads its own built-in d3d11/dxgi and ignores DXVK.
-# Source: cluckers/internal/launch/process_linux.go + DXVK documentation.
-export WINEDLLOVERRIDES="d3d9,d3d10core,d3d10,d3d10_1,d3d11,dxgi=n,b"
+$(if [[ "${_is_proton}" == "false" ]]; then
+  # System Wine with winetricks DXVK needs WINEDLLOVERRIDES to prefer the
+  # native (n) DXVK DLLs over Wine's built-in (b) implementations.
+  printf 'export WINEDLLOVERRIDES="d3d9,d3d10core,d3d10,d3d10_1,d3d11,dxgi=n,b"\n'
+  # Proton handles DLL overrides internally — setting WINEDLLOVERRIDES would
+  # break Proton's own override chain.
+fi)
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
@@ -11286,9 +11261,8 @@ EOF
   # launch it from your Steam library and access the Steam overlay and
   # controller configurator.
   #
-  # Also configures Realm Royale (AppID 813820) to use Proton-GE for native
-  # Steam installs of the game. Proton-GE is a community build of Wine/Proton
-  # with extra codecs and patches that improve game compatibility.
+  # Also configures Realm Royale (AppID 813820) to use the detected Proton
+  # build for native Steam installs of the game.
   #
   # Steam must be closed before we write its config files. If Steam is running
   # the changes will be overwritten when Steam exits.
@@ -11339,7 +11313,7 @@ EOF
       python3 - << 'PYEOF'
 """Adds Cluckers Central to Steam as a non-Steam shortcut.
 
-Also writes Proton-GE compatibility overrides for Realm Royale (AppID 813820)
+Also writes Proton compatibility overrides for Realm Royale (AppID 813820)
 to config.vdf and localconfig.vdf.
 """
 
@@ -11433,7 +11407,7 @@ try:
 except Exception as exc:  # pylint: disable=broad-except
     print(f"{_WARN} Could not update shortcuts.vdf: {exc}")
 
-# -- config.vdf: assign Proton-GE for Realm Royale -------------------------
+# -- config.vdf: assign detected Proton build for Realm Royale -------------
 config_path = os.path.join(STEAM_ROOT, "config", "config.vdf")
 if os.path.exists(config_path):
     try:
@@ -11448,13 +11422,13 @@ if os.path.exists(config_path):
         )
         for appid in (REALM_APPID, str(shortcut_appid)):
             mapping[appid] = {
-                "name":    "proton_ge",
+                "name":    "${_proton_tool_name}",
                 "config":  "",
                 "Priority": "250",
             }
         with open(config_path, "w", encoding="utf-8") as fh:
             vdf.dump(cfg, fh, pretty=True)
-        print(f"{_OK} Set Proton-GE for Realm Royale in config.vdf.")
+        print(f"{_OK} Set Proton compat tool for Realm Royale in config.vdf.")
     except Exception as exc:  # pylint: disable=broad-except
         print(f"{_WARN} Could not update config.vdf: {exc}")
 
