@@ -3,7 +3,8 @@
 #  Cluckers Central — Linux Setup Script
 #
 #  Installs Wine, Windows libraries, and the game. Handles authentication
-#  directly via the Project Crown gateway API (no Windows launcher needed).
+#  directly via the Project Crown gateway API (the server that manages your
+#  account and game content — no Windows launcher needed).
 #  Optionally configures Steam integration and Gamescope.
 #
 #  USAGE
@@ -1195,9 +1196,9 @@ DECK_LAYOUT_EOF
 # Matches FindWine() logic in internal/wine/detect.go.
 #
 # Arguments:
-#   $1 - nameref to store the wine binary path
-#   $2 - nameref to store the is_proton boolean ("true"/"false")
-#   $3 - nameref to store the proton tool name
+#   $1 - variable name to store the wine binary path
+#   $2 - variable name to store the is_proton boolean ("true"/"false")
+#   $3 - variable name to store the proton tool name
 find_wine() {
   local -n _out_path=$1
   local -n _out_is_proton=$2
@@ -1345,7 +1346,7 @@ main() {
   printf "%b╚══════════════════════════════════════════════════════╝%b\n\n" "${GREEN}" "${NC}"
 
   # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
-  # Step 8 (launcher). find_wine writes to the three nameref variables.
+  # Step 8 (launcher). find_wine sets the variables passed as arguments.
   find_wine real_wine_path _is_proton _proton_tool_name || true
 
   # --------------------------------------------------------------------------
@@ -1353,8 +1354,10 @@ main() {
   #
   # Detects your Linux distribution's package manager (apt for Ubuntu/Debian,
   # pacman for Arch, dnf for Fedora, zypper for openSUSE) and installs any
-  # missing tools. The MinGW cross-compiler is NOT installed here — the helper
-  # binaries (shm_launcher.exe, xinput1_3.dll) are pre-compiled and embedded (Step 6).
+  # missing tools. 
+  #
+  # Note: This step requires 'sudo' (administrator) privileges to install 
+  # system-wide tools like Wine.
   # --------------------------------------------------------------------------
   step_msg "Step 1 — Checking system tools..."
 
@@ -11390,11 +11393,13 @@ export WINEDLLOVERRIDES="dxgi=n"
 WINE="${real_wine_path}"
 
 # Sync primitives: ntsync (modern) or fsync (standard GE-Proton).
+# These improve game performance and reduce stutter by optimizing how
+# the game synchronizes background tasks with your CPU.
 # Only set when using a GE-Proton build.
 $(if [[ "${real_wine_path}" == *"GE-Proton"* ]]; then
-  # Use ntsync if /dev/ntsync exists (compatible kernel). 
+  # Use ntsync if /dev/ntsync exists (requires a modern Linux kernel 6.10+).
   # Otherwise fall back to fsync (available in all GE-Proton builds).
-  # If you experience EAC kicks, try swapping WINE_NTSYNC for WINEFSYNC.
+  # If you experience any anti-cheat kicks, try swapping WINE_NTSYNC for WINEFSYNC.
   if [[ -c /dev/ntsync ]]; then
     printf 'export WINE_NTSYNC=1\n'
   else
