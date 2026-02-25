@@ -1061,15 +1061,42 @@ if os.path.basename(path) == "DefaultInput.ini":
             if idx > 0:
                 txt = txt[:idx] + remove + "\n" + txt[idx:]
                 changed = True
-    # Ensure bUsingGamepad=True in both input sections.
-if "bUsingGamepad=False" in txt or "bUsingGamepad=false" in txt:
-    txt = txt.replace("bUsingGamepad=False", "bUsingGamepad=True")
-    txt = txt.replace("bUsingGamepad=false", "bUsingGamepad=True")
-    changed = True
-
-if "bUsingGamepad=True" not in txt:
-    txt += "\n[Engine.PlayerInput]\nbUsingGamepad=True\n\n[TgGame.TgPlayerInput]\nbUsingGamepad=True\n"
-    changed = True
+    # Ensure bUsingGamepad=True and AllowJoystickInput=True in input sections.
+for section in ["[Engine.PlayerInput]", "[TgGame.TgPlayerInput]"]:
+    if section not in txt:
+        txt += f"\n{section}\nbUsingGamepad=True\nAllowJoystickInput=True\n"
+        changed = True
+    else:
+        # If section exists, ensure keys are set
+        lines = txt.splitlines()
+        new_lines = []
+        in_sect = False
+        has_gamepad = False
+        has_joystick = False
+        for line in lines:
+            if line.strip().lower() == section.lower():
+                in_sect = True
+            elif in_sect and line.strip().startswith("["):
+                if not has_gamepad: new_lines.append("bUsingGamepad=True")
+                if not has_joystick: new_lines.append("AllowJoystickInput=True")
+                in_sect = False
+            
+            if in_sect:
+                if line.strip().lower().startswith("businggamepad="):
+                    line = "bUsingGamepad=True"
+                    has_gamepad = True
+                    changed = True
+                if line.strip().lower().startswith("allowjoystickinput="):
+                    line = "AllowJoystickInput=True"
+                    has_joystick = True
+                    changed = True
+            new_lines.append(line)
+        
+        if in_sect: # Section was at end of file
+            if not has_gamepad: new_lines.append("bUsingGamepad=True")
+            if not has_joystick: new_lines.append("AllowJoystickInput=True")
+            changed = True
+        txt = "\n".join(new_lines)
 
 if changed:
     with open(path, "w", encoding="utf-8") as f:
@@ -11588,6 +11615,11 @@ export WINEDEBUG="-all"
 # https://github.com/Lyceris-chan/cluckers/blob/main/internal/launch/process_linux.go
 # xinput1_3=n: Use our custom remapper from Step 6.
 export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"
+
+# Controller detection: Source: Hi-Rez community fixes for Linux.
+# Disabling SDL HIDAPI prevents double-detection and camera spin bugs.
+export SDL_JOYSTICK_HIDAPI=0
+export SDL_JOYSTICK_HIDAPI_PS5=0
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
