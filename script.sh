@@ -1495,6 +1495,14 @@ main() {
   # Python libraries used by this script:
   #   vdf      — reads/writes Steam's binary config files (shortcuts.vdf etc.)
   #   blake3   — computes hashes for game file integrity verification
+  
+  # Ensure pip is available.
+  if ! python3 -m pip --version > /dev/null 2>&1; then
+    info_msg "Python 'pip' module not found. Attempting to install..."
+    python3 -m ensurepip --user > /dev/null 2>&1 || true
+    python3 -m pip install --upgrade --user pip > /dev/null 2>&1 || true
+  fi
+
   local -a py_libs=(vdf blake3)
   local lib
   for lib in "${py_libs[@]}"; do
@@ -11843,7 +11851,7 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   # exec's the game. Source: internal/launch/process_linux.go.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
-    ${GS_ARGS} -- \
+    DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
       "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
         "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
         "${_game_args[@]}" &
@@ -11859,7 +11867,7 @@ else
   # Source: process_linux.go "No bootstrap data -- launch game directly."
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
-    ${GS_ARGS} -- "${WINE}" "${_game_exe}" "${_game_args[@]}" &
+    DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${WINE}" "${_game_exe}" "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
@@ -12109,8 +12117,13 @@ PYEOF
   printf "\n"
   printf "  Or launch from your application menu / Steam library.\n"
   printf "\n"
-  printf "  If login fails, delete credentials and re-run:\n"
-  printf "    rm ~/.cluckers/credentials.enc\n"
+  if [[ "${use_vanilla}" == "true" ]]; then
+    printf "  %b[VANILLA MODE]%b Game will launch with standard servers.\n" "${YELLOW}" "${NC}"
+    printf "  Custom hostx and authentication are bypassed.\n"
+  else
+    printf "  If login fails, delete credentials and re-run:\n"
+    printf "    rm ~/.cluckers/credentials.enc\n"
+  fi
   printf "  If the game crashes, check the Wine log:\n"
   printf "    cat /tmp/cluckers_wine.log\n"
   printf "\n"
