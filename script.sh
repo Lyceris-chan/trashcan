@@ -357,13 +357,16 @@ import json, sys
 try:
     d = json.loads(sys.argv[1])
     v = d.get("latest_version", "")
-    print(v if v else "")
+    if v:
+        print(v)
+    else:
+        sys.exit(1)
 except Exception:
-    print("")
+    sys.exit(1)
 EOF
 )
 
-  if [[ ! "${check}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ $? -ne 0 ]] || [[ ! "${check}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     return 1
   fi
 }
@@ -1350,7 +1353,7 @@ find_wine() {
     done
   done
 
-  if [[ -n "${newest_proton}" ]]; then
+  if [[ -n "${newest_proton}" ]] && [[ -x "${newest_proton}" ]]; then
     _out_path="${newest_proton}"
     _out_is_proton="true"
     _out_tool_name=$(basename "$(dirname "$(dirname "$(dirname "${newest_proton}")")")")
@@ -1359,12 +1362,18 @@ find_wine() {
 
   if command -v wine64 >/dev/null 2>&1; then
     _out_path=$(command -v wine64)
-    _out_tool_name="wine"
-    return 0
-  elif command -v wine >/dev/null 2>&1; then
+    if [[ -x "${_out_path}" ]]; then
+      _out_tool_name="wine"
+      return 0
+    fi
+  fi
+  
+  if command -v wine >/dev/null 2>&1; then
     _out_path=$(command -v wine)
-    _out_tool_name="wine"
-    return 0
+    if [[ -x "${_out_path}" ]]; then
+      _out_tool_name="wine"
+      return 0
+    fi
   fi
 
   return 1
@@ -11566,8 +11575,8 @@ TOOLS_DIR="${TOOLS_DIR}"
 USE_GAMESCOPE="${use_gamescope}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 SKIP_MOVIES="${skip_movies}"
-GATEWAY_URL="https://gateway-dev.project-crown.com"
-HOST_X="157.90.131.105"
+GATEWAY_URL="${GATEWAY_URL:-https://gateway-dev.project-crown.com}"
+HOST_X="${HOST_X:-157.90.131.105}"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
 
 # Skip movies logic (mirrors HandleMovies in cluckers/internal/launch/movies.go)
