@@ -911,82 +911,50 @@ apply_game_patches() {
   fi
 
   # -- Movies: handle intro movies (skip or restore) -------------------------
-  local movie_dir="${game_dir}/Realm-Royale/RealmGame/Content/Movies"
-  if [[ -d "${movie_dir}" ]]; then
-    local movie
-    if [[ "${skip_movies_flag}" == "true" ]]; then
-      info_msg "Patch: Skipping intro movies (renaming .bik files)..."
-      for movie in "HiRezLogo.bik" "GeorgiaMedia.bik" "Intro_Legal.bik"; do
-        if [[ -f "${movie_dir}/${movie}" ]]; then
-          mv "${movie_dir}/${movie}" "${movie_dir}/${movie}.bak" 2>/dev/null || true
-          info_msg "  Renamed ${movie} -> ${movie}.bak"
-        fi
-      done
-      ok_msg "Intro movies disabled."
-    else
-      # Restore movies if skip_movies_flag is false
-      info_msg "Patch: Restoring intro movies..."
-      for movie in "HiRezLogo.bik" "GeorgiaMedia.bik" "Intro_Legal.bik"; do
-        if [[ -f "${movie_dir}/${movie}.bak" ]]; then
-          mv "${movie_dir}/${movie}.bak" "${movie_dir}/${movie}" 2>/dev/null || true
-          info_msg "  Restored ${movie}.bak -> ${movie}"
-        fi
-      done
-      ok_msg "Intro movies enabled."
-    fi
+  if [[ "${skip_movies_flag}" == "true" ]]; then
+    info_msg "Patch: Skipping intro movies (INI)..."
+  else
+    info_msg "Patch: Restoring intro movies..."
+  fi
 
-    # UE3 INI patch for movies
-    info_msg "Patch: Setting bForceNoMovies=True in INI files..."
-    for ini in "${config_dir}/RealmGame.ini" "${config_dir}/DefaultGame.ini"; do
-      mkdir -p "$(dirname "${ini}")"
-      touch "${ini}"
+  for ini in \
+    "${config_dir}/RealmEngine.ini" \
+    "${engine_config_dir}/BaseEngine.ini"; do
+    if [[ -f "${ini}" ]]; then
       chmod u+w "${ini}"
-      if [[ "${skip_movies_flag}" == "true" ]]; then
-        python3 - "${ini}" << 'MOVIE_INI_EOF'
-import sys, os
+      python3 - "${ini}" "${skip_movies_flag}" << 'MOVIE_PATCH_EOF'
+import sys, re
+
 path = sys.argv[1]
+skip = sys.argv[2].lower() == "true"
+target = "bForceNoMovies=" + ("True" if skip else "False")
+
 with open(path, "r", encoding="utf-8", errors="replace") as f:
     lines = f.readlines()
 
-new_lines = []
+out_lines = []
 in_section = False
-found_section = False
-found_key = False
+found = False
 
 for line in lines:
-    stripped = line.strip()
-    if stripped == "[FullScreenMovie]":
-        in_section = True
-        found_section = True
-    elif stripped.startswith("[") and stripped.endswith("]"):
-        in_section = False
+    trimmed = line.strip()
+    if trimmed.startswith("[") and trimmed.endswith("]"):
+        in_section = (trimmed.lower() == "[fullscreenmovie]")
     
-    if in_section and "bForceNoMovies" in line:
-        line = "bForceNoMovies=True\n"
-        found_key = True
+    if in_section and trimmed.lower().startswith("bforcenomovies="):
+        line = target + "\n"
+        found = True
     
-    new_lines.append(line)
+    out_lines.append(line)
 
-if not found_section:
-    new_lines.append("\n[FullScreenMovie]\nbForceNoMovies=True\n")
-elif not found_key:
-    # Find where the section started and insert it
-    for i, line in enumerate(new_lines):
-        if line.strip() == "[FullScreenMovie]":
-            new_lines.insert(i+1, "bForceNoMovies=True\n")
-            break
+# If section exists but key was missing, we don't append here to stay safe.
+# Most UE3 builds have this key by default.
 
 with open(path, "w", encoding="utf-8") as f:
-    f.writelines(new_lines)
-MOVIE_INI_EOF
-        info_msg "  Patched $(basename "${ini}")"
-      else
-        sed -i 's/bForceNoMovies=True/bForceNoMovies=False/g' "${ini}" 2>/dev/null || true
-      fi
-    done
-  else
-    warn_msg "Movie directory not found — skipping movie patch."
-  fi
+    f.writelines(out_lines)
+MOVIE_PATCH_EOF
+    fi
+  done
 
   # -- Display: force fullscreen 1280x800 (Steam Deck only) ------------------
   if [[ "${steam_deck_flag}" == "true" ]]; then
@@ -11549,6 +11517,43 @@ SKIP_MOVIES="${skip_movies}"
 GATEWAY_URL="https://gateway-dev.project-crown.com"
 HOST_X="157.90.131.105"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
+
+# Skip movies logic (mirrors HandleMovies in cluckers/internal/launch/movies.go)
+# Renames .bik files to .bak if SKIP_MOVIES is true.
+_handle_movies() {
+  local skip="$1"
+  local skip_val="False"
+  [[ "${skip}" == "true" ]] && skip_val="True"
+
+  local target="bForceNoMovies=${skip_val}"
+  local ini
+
+  for ini in \
+    "${GAME_DIR}/Realm-Royale/RealmGame/Config/RealmEngine.ini" \
+    "${GAME_DIR}/Realm-Royale/Engine/Config/BaseEngine.ini"; do
+    [[ -f "${ini}" ]] || continue
+
+    python3 - "${ini}" "${target}" << 'MOVIE_PATCH_EOF'
+import sys
+path = sys.argv[1]
+target = sys.argv[2]
+with open(path, "r", encoding="utf-8", errors="replace") as f:
+    lines = f.readlines()
+out = []
+in_section = False
+for line in lines:
+    t = line.strip()
+    if t.startswith("[") and t.endswith("]"):
+        in_section = (t.lower() == "[fullscreenmovie]")
+    if in_section and t.lower().startswith("bforcenomovies="):
+        line = target + "\n"
+    out.append(line)
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(out)
+MOVIE_PATCH_EOF
+  done
+}
+_handle_movies "\${SKIP_MOVIES}"
 EOF
 
 
@@ -11741,11 +11746,6 @@ _game_args=(
   "-seekfreeloadingpcconsole"
   "-nohomedir"
 )
-
-# Skip intro movies/splash if requested.
-if [[ "${SKIP_MOVIES}" == "true" ]]; then
-  _game_args+=("-nosplash" "-nostartupmovies" "-novid" "-nointro")
-fi
 
 # Append bootstrap shared memory argument if a bootstrap blob is present.
 if [[ -s "${_bootstrap_tmp}" ]]; then
