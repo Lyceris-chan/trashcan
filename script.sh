@@ -915,27 +915,32 @@ apply_game_patches() {
   if [[ -d "${movie_dir}" ]]; then
     local movie
     if [[ "${skip_movies_flag}" == "true" ]]; then
-      info_msg "Skipping intro movies..."
+      info_msg "Patch: Skipping intro movies (renaming .bik files)..."
       for movie in "HiRezLogo.bik" "GeorgiaMedia.bik" "Intro_Legal.bik"; do
         if [[ -f "${movie_dir}/${movie}" ]]; then
           mv "${movie_dir}/${movie}" "${movie_dir}/${movie}.bak" 2>/dev/null || true
+          info_msg "  Renamed ${movie} -> ${movie}.bak"
         fi
       done
       ok_msg "Intro movies disabled."
     else
       # Restore movies if skip_movies_flag is false
-      info_msg "Restoring intro movies..."
+      info_msg "Patch: Restoring intro movies..."
       for movie in "HiRezLogo.bik" "GeorgiaMedia.bik" "Intro_Legal.bik"; do
         if [[ -f "${movie_dir}/${movie}.bak" ]]; then
           mv "${movie_dir}/${movie}.bak" "${movie_dir}/${movie}" 2>/dev/null || true
+          info_msg "  Restored ${movie}.bak -> ${movie}"
         fi
       done
       ok_msg "Intro movies enabled."
     fi
+  else
+    warn_msg "Movie directory not found — skipping movie patch."
   fi
 
   # -- Display: force fullscreen 1280x800 (Steam Deck only) ------------------
   if [[ "${steam_deck_flag}" == "true" ]]; then
+    info_msg "Patch: Forcing 1280x800 fullscreen (Steam Deck)..."
     ini="${config_dir}/RealmSystemSettings.ini"
     if [[ -f "${ini}" ]]; then
       chmod u+w "${ini}"
@@ -965,18 +970,21 @@ DECK_DISPLAY_EOF
     fi
   fi
 
-  # -- Input: remove phantom mouse-axis counters (Deck or Controller mode) ---  # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
-  # gamepad to KB/M mode whenever phantom mouse events arrive under Wine.
-  # Source: deckconfig.go — PatchDeckInputConfig(), deckInputPatches var.
-  for ini in \
-    "${engine_config_dir}/BaseInput.ini" \
-    "${config_dir}/DefaultInput.ini" \
-    "${config_dir}/RealmInput.ini"; do
-    if [[ ! -f "${ini}" ]]; then
-      continue
-    fi
-    chmod u+w "${ini}"
-    python3 - "${ini}" << 'DECK_INPUT_EOF'
+  # -- Input: remove phantom mouse-axis counters (Deck or Controller mode) ---
+  if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
+    info_msg "Patch: Neutralizing phantom mouse-axis counters (Controller mode)..."
+    # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
+    # gamepad to KB/M mode whenever phantom mouse events arrive under Wine.
+    # Source: deckconfig.go — PatchDeckInputConfig(), deckInputPatches var.
+    for ini in \
+      "${engine_config_dir}/BaseInput.ini" \
+      "${config_dir}/DefaultInput.ini" \
+      "${config_dir}/RealmInput.ini"; do
+      if [[ ! -f "${ini}" ]]; then
+        continue
+      fi
+      chmod u+w "${ini}"
+      python3 - "${ini}" << 'DECK_INPUT_EOF'
 import sys
 
 path = sys.argv[1]
@@ -1030,13 +1038,15 @@ if changed:
 else:
     print("  " + os.path.basename(path) + " already patched — skipping.")
 DECK_INPUT_EOF
-  done
+    done
+  fi
 
   # Make all INI files writable so the game can save user controller preferences.
   chmod u+w "${config_dir}"/*.ini 2>/dev/null || true
 
   # -- Controller layout: deploy controller_neptune_config.vdf (Deck only) ----
   if [[ "${steam_deck_flag}" == "true" ]]; then
+    info_msg "Patch: Deploying Steam Deck controller layout template..."
     # Best-effort: deploy to every Steam userdata account directory found.
     # Preserves any existing user-customised layout (never overwrites).
     # Source: deckconfig.go — deployDeckControllerLayout().
@@ -1222,11 +1232,14 @@ for uid in os.listdir(userdata):
     os.makedirs(deploy_dir, exist_ok=True)
     with open(deploy_path, "wb") as f:
         f.write(layout_data)
-    print(f"  Deployed controller layout for uid {uid} (appid {app_id}).")
+    print(f"  OK: Deployed controller layout for uid {uid} (appid {app_id}).")
     deployed += 1
 
-    if deployed == 0 and app_id is None:
-        print("  Cluckers shortcut not found in Steam — add it first (Step 14).")
+if deployed == 0:
+    if app_id is None:
+        print("  WARN: Cluckers shortcut not found in Steam — add it as a non-Steam game first.")
+    else:
+        print("  INFO: All found Steam accounts already have the controller layout template.")
 DECK_LAYOUT_EOF
 
     rm -f "${vdf_tmp}"
@@ -11681,7 +11694,7 @@ _game_args=(
 
 # Skip intro movies/splash if requested.
 if [[ "${SKIP_MOVIES}" == "true" ]]; then
-  _game_args+=("-nosplash" "-nomoviestartup")
+  _game_args+=("-nosplash" "-nostartupmovies")
 fi
 
 # Append bootstrap shared memory argument if a bootstrap blob is present.
