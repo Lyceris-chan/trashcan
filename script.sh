@@ -47,7 +47,7 @@
 #    Steam Deck's SteamOS already manages its own Gamescope session:
 #      • RealmSystemSettings.ini  — forced fullscreen at 1280×800
 #      • DefaultInput.ini / RealmInput.ini — removes phantom mouse-axis
-#        counters that cause the gamepad to stop working mid-match under Wine
+#        counters to prevent the gamepad switching to KB/M under Wine
 #      • controller_neptune_config.vdf — deploys the custom Deck button layout
 #        to your Steam controller config directory (preserves any existing one)
 #
@@ -89,6 +89,19 @@
 #      shm_launcher.exe : 9e0228a69a789ac02d279635f24f8903341d3c165199a088a8e82db62c7a1366
 #      xinput1_3.dll    : 81209542e35fda123d524ad59b1e533fda55818ab29da9f03d8b7b2af5ee9a80
 #
+# SOURCE REFERENCES
+#   All behaviour mirrors the cluckers Go source. Key files:
+#   internal/launch/process_linux.go  — game launch args, env vars, shm usage
+#   internal/launch/pipeline_linux.go — launch pipeline steps
+#   internal/wine/detect.go           — Wine/Proton detection logic
+#   internal/wine/prefix.go           — Wine prefix creation and winetricks
+#   internal/wine/verify.go           — required DLLs (RequiredDLLs)
+#   internal/game/version.go          — version check and game path
+#   internal/config/paths_linux.go    — data directory paths
+#   internal/gateway/client.go        — gateway API URL format (/json/<cmd>)
+#   internal/gateway/types.go         — request/response types
+#   assets/controller_neptune_config.vdf — Steam Deck controller layout
+#
 # ==============================================================================
 
 # Exit on error, undefined variable, or pipe failure.
@@ -107,7 +120,7 @@ GAME_VERSION="${GAME_VERSION:-auto}"
 # Gamescope compositor arguments baked into the launcher at setup time.
 #
 # Gamescope is a Valve compositor that keeps the mouse cursor locked inside the
-# game window, which is otherwise broken on Wayland (GNOME, KDE, COSMIC). If
+# game window natively on Wayland (GNOME, KDE, COSMIC). If
 # you do not need it, pass --no-gamescope / -g when running this script.
 #
 # Common tweaks:
@@ -548,7 +561,7 @@ if os.path.exists(shortcuts_path):
         keys_to_delete = [
             k for k, v in sc.items()
             if isinstance(v, dict)
-            and LAUNCHER in v.get("Exe", v.get("exe", ""))
+            and int(v.get("appid", v.get("AppId", 0))) == shortcut_appid
         ]
         for k in keys_to_delete:
             del sc[k]
@@ -868,8 +881,8 @@ is_steam_deck() {
 # Patches applied:
 #   RealmSystemSettings.ini  — forces fullscreen at 1280x800.
 #   DefaultInput.ini / RealmInput.ini — removes phantom mouse-axis counters
-#     (Count bXAxis / Count bYAxis) that cause the controller to stop working
-#     mid-match under Wine.
+#     (Count bXAxis / Count bYAxis) to prevent the controller from switching
+#     to keyboard/mouse mode under Wine.
 #   controller_neptune_config.vdf — Steam Deck button layout (best-effort).
 #
 # Arguments:
@@ -959,10 +972,14 @@ if os.path.basename(path) == "DefaultInput.ini":
                 txt = txt[:idx] + remove + "\n" + txt[idx:]
                 changed = True
     # Ensure bUsingGamepad=True in both input sections.
-    for section in ["[Engine.PlayerInput]", "[TgGame.TgPlayerInput]"]:
-        if section not in txt:
-            txt += f"\n{section}\nbUsingGamepad=True\n"
-            changed = True
+if "bUsingGamepad=False" in txt or "bUsingGamepad=false" in txt:
+    txt = txt.replace("bUsingGamepad=False", "bUsingGamepad=True")
+    txt = txt.replace("bUsingGamepad=false", "bUsingGamepad=True")
+    changed = True
+
+if "bUsingGamepad=True" not in txt:
+    txt += "\n[Engine.PlayerInput]\nbUsingGamepad=True\n\n[TgGame.TgPlayerInput]\nbUsingGamepad=True\n"
+    changed = True
 
 if changed:
     with open(path, "w", encoding="utf-8") as f:
@@ -972,6 +989,9 @@ else:
     print("  " + os.path.basename(path) + " already patched — skipping.")
 DECK_INPUT_EOF
   done
+
+  # Make all INI files writable so the game can save user controller preferences.
+  chmod u+w "${config_dir}"/*.ini 2>/dev/null || true
 
   # -- Controller layout: deploy controller_neptune_config.vdf ---------------
   # Best-effort: deploy to every Steam userdata account directory found.
@@ -1170,6 +1190,92 @@ DECK_LAYOUT_EOF
   ok_msg "Steam Deck patches applied."
 }
 
+# Locates the newest Proton-GE installation or falls back to system Wine.
+# Matches FindWine() logic in internal/wine/detect.go.
+#
+# Arguments:
+#   $1 - nameref to store the wine binary path
+#   $2 - nameref to store the is_proton boolean ("true"/"false")
+#   $3 - nameref to store the proton tool name
+find_wine() {
+  local -n _out_path=$1
+  local -n _out_is_proton=$2
+  local -n _out_tool_name=$3
+
+  _out_path=""
+  _out_is_proton="false"
+  _out_tool_name="proton"
+
+  local search_dirs=(
+    "/usr/share/steam/compatibilitytools.d"
+    "${HOME}/.steam/root/compatibilitytools.d"
+    "${HOME}/.steam/steam/compatibilitytools.d"
+    "${HOME}/.local/share/Steam/compatibilitytools.d"
+    "${HOME}/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d"
+    "${HOME}/snap/steam/common/.steam/steam/compatibilitytools.d"
+    "${HOME}/.var/app/net.davidotek.pupgui2/data/Steam/compatibilitytools.d"
+    "${HOME}/.local/share/Steam/steamapps/common/Proton - GE/compatibilitytools.d"
+  )
+
+  if [[ -L "${HOME}/.steam/root" ]]; then
+    search_dirs+=("$(readlink -f "${HOME}/.steam/root")/compatibilitytools.d")
+  fi
+  if [[ -L "${HOME}/.steam/steam" ]]; then
+    search_dirs+=("$(readlink -f "${HOME}/.steam/steam")/compatibilitytools.d")
+  fi
+
+  local newest_proton=""
+  local newest_version="00000-00000"
+
+  local d p base major minor ver
+  for d in "${search_dirs[@]}"; do
+    if [[ ! -d "${d}" ]]; then continue; fi
+
+    if [[ -f "${d}/proton-ge-custom/files/bin/wine64" ]]; then
+      if [[ -z "${newest_proton}" || "00000-00000" > "${newest_version}" ]]; then
+        newest_proton="${d}/proton-ge-custom/files/bin/wine64"
+        newest_version="00000-00000"
+      fi
+    fi
+
+    # Check for versioned GE-Proton*
+    # shellcheck disable=SC2044,SC2231
+    for p in "${d}"/GE-Proton*; do
+      if [[ -f "${p}/files/bin/wine64" ]]; then
+        base=$(basename "${p}")
+        if [[ "${base}" =~ GE-Proton([0-9]+)-([0-9]+) ]]; then
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          ver=$(printf "%05d-%05d" "${major}" "${minor}")
+          if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
+            newest_version="${ver}"
+            newest_proton="${p}/files/bin/wine64"
+          fi
+        fi
+      fi
+    done
+  done
+
+  if [[ -n "${newest_proton}" ]]; then
+    _out_path="${newest_proton}"
+    _out_is_proton="true"
+    _out_tool_name=$(basename "$(dirname "$(dirname "$(dirname "${newest_proton}")")")")
+    return 0
+  fi
+
+  if command -v wine64 >/dev/null 2>&1; then
+    _out_path=$(command -v wine64)
+    _out_tool_name="wine"
+    return 0
+  elif command -v wine >/dev/null 2>&1; then
+    _out_path=$(command -v wine)
+    _out_tool_name="wine"
+    return 0
+  fi
+
+  return 1
+}
+
 # Parses command-line flags and runs all install steps in order.
 #
 # Arguments:
@@ -1179,7 +1285,6 @@ main() {
   local auto_mode="false"
   local no_gamescope="false"
   local steam_deck="false"
-  local final_gamescope_opts="${GAMESCOPE_ARGS}"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
@@ -1349,11 +1454,35 @@ main() {
   else
     info_msg "Creating Wine prefix at ${WINEPREFIX} (this takes ~30 seconds)..."
     mkdir -p "${WINEPREFIX}"
-    # Suppress Wine GUI dialogs during init (matches wineEnv() in prefix.go):
-    #   DISPLAY=""                   — no X window for mono/gecko installers
-    #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
-    DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
-      wine wineboot --init 2>/dev/null || true
+
+    # If we are using Proton, it's safer and faster to copy its bundled default_pfx
+    # instead of running wineboot --init (which can hang).
+    # Source: cluckers/internal/wine/prefix.go (createFromProtonTemplate)
+    local proton_template=""
+    if [[ "${_is_proton}" == "true" ]]; then
+      # find_wine resolves real_wine_path to something like .../Proton/files/bin/wine
+      local proton_root
+      proton_root="$(dirname "$(dirname "$(dirname "${real_wine_path}")")")"
+      # Steam's Proton uses .../Proton/dist/share/default_pfx or .../Proton/files/share/default_pfx
+      if [[ -d "${proton_root}/dist/share/default_pfx" ]]; then
+        proton_template="${proton_root}/dist/share/default_pfx"
+      elif [[ -d "${proton_root}/files/share/default_pfx" ]]; then
+        proton_template="${proton_root}/files/share/default_pfx"
+      elif [[ -d "${proton_root}/share/default_pfx" ]]; then
+        proton_template="${proton_root}/share/default_pfx"
+      fi
+    fi
+
+    if [[ -n "${proton_template}" ]]; then
+      info_msg "Copying Proton prefix template from ${proton_template}..."
+      cp -r "${proton_template}"/* "${WINEPREFIX}/"
+    else
+      # Suppress Wine GUI dialogs during init (matches wineEnv() in prefix.go):
+      #   DISPLAY=""                   — no X window for mono/gecko installers
+      #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
+      DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
+        "${real_wine_path}" wineboot --init 2>/dev/null || true
+    fi
     ok_msg "Wine prefix created."
   fi
 
@@ -1369,7 +1498,7 @@ main() {
   # (Depot 228990). The legacy 'directx9' winetricks verb is deprecated
   # in current winetricks versions and issues a warning.
   #
-  # DXVK is NOT installed — the game renders with DirectX 11 natively.
+  # DXVK is installed — provides d3d11.dll checked by verify.go and improves performance.
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
@@ -1384,15 +1513,8 @@ main() {
   # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
   # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
   install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable"
+  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"
   install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)"
-  # DXVK is only installed via winetricks when using system Wine. Proton
-  # bundles its own DXVK internally — installing a second copy via winetricks
-  # breaks Proton's DLL override chain and causes STATUS_DLL_NOT_FOUND.
-  if [[ "${_is_proton}" == "false" ]]; then
-    install_winetricks_pkg "dxvk"     "DXVK (Vulkan-backed Direct3D 9/10/11)"
-  else
-    ok_msg "Proton detected — skipping winetricks DXVK (Proton bundles its own)."
-  fi
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
@@ -10875,10 +10997,12 @@ XDLL_B64_EOF
         install_icoutils "${pkg_mgr}"
         local ico_tmp2
         ico_tmp2=$(mktemp --suffix=.ico)
-        wrestool -x --type=14 -o "${ico_tmp2}" "${game_exe_for_icon}" 2>/dev/null \
-          && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp2}" 2>/dev/null \
-          && ok_msg "Icon extracted." \
-          || warn_msg "Extraction still failed — using generic icon."
+        if wrestool -x --type=14 -o "${ico_tmp2}" "${game_exe_for_icon}" 2>/dev/null \
+          && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp2}" 2>/dev/null; then
+          ok_msg "Icon extracted."
+        else
+          warn_msg "Extraction still failed — using generic icon."
+        fi
         rm -f "${ico_tmp2}"
       else
         warn_msg "Skipping icon extraction — generic icon will be used."
@@ -10909,16 +11033,10 @@ XDLL_B64_EOF
   # Wine/Proton was detected upfront in main() before Step 3.
   # real_wine_path, _is_proton, and _proton_tool_name are already set.
   [[ -z "${real_wine_path}" ]] && \
-    error_exit "No Wine or Proton found. Install wine or Steam + Proton."
-  if [[ "${_is_proton}" == "true" ]]; then
-    ok_msg "Wine binary (Proton): ${real_wine_path}"
-    ok_msg "Proton compat tool name: ${_proton_tool_name}"
-    ok_msg "WINEFSYNC=1 will be set in the launcher."
-  else
-    ok_msg "Wine binary (system): ${real_wine_path}"
-    info_msg "No Proton found — using system Wine."
-    info_msg "For best performance, install a Proton build via Steam or ProtonUp-Qt."
-  fi
+    error_exit "No Proton found. Install a Proton build via Steam or ProtonUp-Qt."
+  ok_msg "Wine binary (Proton): ${real_wine_path}"
+  ok_msg "Proton compat tool name: ${_proton_tool_name}"
+  ok_msg "WINEFSYNC=1 will be set in the launcher."
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
 
@@ -10928,37 +11046,37 @@ XDLL_B64_EOF
 # Cluckers Central launcher — generated by cluckers-setup.sh on $(date)
 # Re-run cluckers-setup.sh to regenerate after updating Wine or the game.
 
+# Strip entirely -- Wine manages its own library paths (matching process_linux.go)
+unset LD_LIBRARY_PATH
+
 export WINEPREFIX="${WINEPREFIX}"
 export WINEARCH="win64"
 
 # Suppress noisy Wine debug output. Set to "" to see full Wine diagnostics.
 export WINEDEBUG="-all"
 
-$(if [[ "${_is_proton}" == "false" ]]; then
-  # System Wine with winetricks DXVK needs WINEDLLOVERRIDES to prefer the
-  # native (n) DXVK DLLs over Wine's built-in (b) implementations.
-  printf 'export WINEDLLOVERRIDES="d3d9,d3d10core,d3d10,d3d10_1,d3d11,dxgi=n,b"\n'
-  # Proton handles DLL overrides internally — setting WINEDLLOVERRIDES would
-  # break Proton's own override chain.
-fi)
+# dxgi=n,b: Source: internal/launch/process_linux.go env append WINEDLLOVERRIDES
+# https://github.com/Lyceris-chan/cluckers/blob/main/internal/launch/process_linux.go
+export WINEDLLOVERRIDES="dxgi=n"
 
 # Wine binary path — baked in at setup time by cluckers-setup.sh.
 # Source: cluckers/internal/wine/detect.go (FindWine)
 WINE="${real_wine_path}"
 
-# WINEFSYNC=1: futex-based sync — supported by all Proton variants and
-# reduces CPU overhead significantly. Only baked in when a Proton wine was
-# detected at setup time; system Wine does not support this variable.
-# Source: cluckers/internal/launch/process_linux.go (wine.IsProtonGE check)
-$(if [[ "${_is_proton}" == "true" ]]; then
-  printf '# WINEFSYNC=1: futex sync — supported by all Proton variants.\nexport WINEFSYNC=1\n'
+# WINEFSYNC=1: futex-based sync. Only set when the detected Wine binary is
+# a GE-Proton build — mirrors wine.IsProtonGE() in internal/wine/detect.go
+# which checks for "GE-Proton" in the path. Other Proton/Wine builds do not
+# reliably support WINEFSYNC.
+# Source: internal/launch/process_linux.go
+$(if [[ "${real_wine_path}" == *"GE-Proton"* ]]; then
+  printf 'export WINEFSYNC=1\n'
 fi)
 
 GAME_DIR="${GAME_DIR}"
 GAME_EXE_REL="${GAME_EXE_REL}"
 TOOLS_DIR="${TOOLS_DIR}"
 NO_GAMESCOPE="${no_gamescope}"
-GS_ARGS="${final_gamescope_opts}"
+GS_ARGS="${GAMESCOPE_ARGS}"
 GATEWAY_URL="https://gateway-dev.project-crown.com"
 HOST_X="157.90.131.105"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
@@ -11155,18 +11273,27 @@ _game_args=(
   "-nohomedir"
 )
 
+# Append bootstrap shared memory argument if a bootstrap blob is present.
+if [[ -s "${_bootstrap_tmp}" ]]; then
+  _game_args+=("-content_bootstrap_shm=${_shm_name}")
+fi
+
 # Cleanup: kill gamescope and wineserver when the game exits, regardless of
 # how it exits (normal close, crash, or signal).
-_GS_PID=""
 _cleanup() {
-  rm -f "${_oidc_tmp}" "${_bootstrap_tmp}" 2>/dev/null || true
-  if [[ -n "${_GS_PID}" ]]; then
-    kill "${_GS_PID}" 2>/dev/null || true
-    wait "${_GS_PID}" 2>/dev/null || true
+  # Kill gamescope if we launched it and it is still running.
+  if [[ -n "${_gs_pid:-}" ]] && kill -0 "${_gs_pid}" 2>/dev/null; then
+    kill "${_gs_pid}" 2>/dev/null || true
   fi
+  # Kill all processes in our process group (wine children etc.).
+  kill -- -$$ 2>/dev/null || true
+  # Clean up the Wine server for this prefix.
   wineserver -k 2>/dev/null || true
+  # Remove temp files we created.
+  [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
+  [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
 }
-trap _cleanup EXIT INT TERM
+trap _cleanup EXIT INT TERM HUP
 
 # ---- Launch ---------------------------------------------------------------
 
@@ -11261,9 +11388,6 @@ EOF
   # launch it from your Steam library and access the Steam overlay and
   # controller configurator.
   #
-  # Also configures Realm Royale (AppID 813820) to use the detected Proton
-  # build for native Steam installs of the game.
-  #
   # Steam must be closed before we write its config files. If Steam is running
   # the changes will be overwritten when Steam exits.
   # --------------------------------------------------------------------------
@@ -11303,19 +11427,12 @@ EOF
     else
       info_msg "Configuring Steam for user ${steam_user}..."
 
-      STEAM_ROOT="${steam_root}" \
       USER_CONFIG_DIR="${steam_userdata}/${steam_user}/config" \
       LAUNCHER_ENV="${LAUNCHER_SCRIPT}" \
-      REALM_APPID="${REALM_ROYALE_APPID}" \
       ICON_PATH_ENV="${ICON_PATH}" \
       APP_NAME_ENV="${APP_NAME}" \
-      GS_ARGS_ENV="${final_gamescope_opts}" \
       python3 - << 'PYEOF'
-"""Adds Cluckers Central to Steam as a non-Steam shortcut.
-
-Also writes Proton compatibility overrides for Realm Royale (AppID 813820)
-to config.vdf and localconfig.vdf.
-"""
+"""Adds Cluckers Central to Steam as a non-Steam shortcut."""
 
 import binascii
 import os
@@ -11323,13 +11440,10 @@ import time
 
 import vdf  # pip install vdf
 
-STEAM_ROOT      = os.environ["STEAM_ROOT"]
 USER_CONFIG_DIR = os.environ["USER_CONFIG_DIR"]
 LAUNCHER        = os.environ["LAUNCHER_ENV"]
-REALM_APPID     = os.environ["REALM_APPID"]
 ICON_PATH       = os.environ["ICON_PATH_ENV"]
 APP_NAME        = os.environ["APP_NAME_ENV"]
-GS_ARGS         = os.environ["GS_ARGS_ENV"]
 
 _OK   = "  [\033[0;32m OK \033[0m]"
 _WARN = "  [\033[1;33mWARN\033[0m]"
@@ -11407,52 +11521,6 @@ try:
 except Exception as exc:  # pylint: disable=broad-except
     print(f"{_WARN} Could not update shortcuts.vdf: {exc}")
 
-# -- config.vdf: assign detected Proton build for Realm Royale -------------
-config_path = os.path.join(STEAM_ROOT, "config", "config.vdf")
-if os.path.exists(config_path):
-    try:
-        with open(config_path, encoding="utf-8", errors="replace") as fh:
-            cfg = vdf.load(fh)
-        mapping = (
-            cfg.setdefault("InstallConfigStore", {})
-               .setdefault("Software", {})
-               .setdefault("Valve", {})
-               .setdefault("Steam", {})
-               .setdefault("CompatToolMapping", {})
-        )
-        for appid in (REALM_APPID, str(shortcut_appid)):
-            mapping[appid] = {
-                "name":    "${_proton_tool_name}",
-                "config":  "",
-                "Priority": "250",
-            }
-        with open(config_path, "w", encoding="utf-8") as fh:
-            vdf.dump(cfg, fh, pretty=True)
-        print(f"{_OK} Set Proton compat tool for Realm Royale in config.vdf.")
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"{_WARN} Could not update config.vdf: {exc}")
-
-# -- localconfig.vdf: set launch options for Realm Royale ------------------
-localconfig_path = os.path.join(USER_CONFIG_DIR, "localconfig.vdf")
-if os.path.exists(localconfig_path):
-    try:
-        with open(localconfig_path, encoding="utf-8", errors="replace") as fh:
-            lc = vdf.load(fh)
-        apps = (
-            lc.setdefault("UserLocalConfigStore", {})
-              .setdefault("Software", {})
-              .setdefault("Valve", {})
-              .setdefault("Steam", {})
-              .setdefault("apps", {})
-        )
-        apps.setdefault(REALM_APPID, {})["LaunchOptions"] = (
-            f"{GS_ARGS} -- %command%"
-        )
-        with open(localconfig_path, "w", encoding="utf-8") as fh:
-            vdf.dump(lc, fh, pretty=True)
-        print(f"{_OK} Set Gamescope launch options for Realm Royale.")
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"{_WARN} Could not update localconfig.vdf: {exc}")
 PYEOF
     fi
   fi
@@ -11475,8 +11543,8 @@ PYEOF
   #   2. DefaultInput.ini / RealmInput.ini / BaseInput.ini — remove "Count
   #      bXAxis" and "Count bYAxis" from mouse bindings. These counters make
   #      UE3 switch input mode from gamepad to keyboard/mouse whenever Wine
-  #      or the Deck's touch screen generates a phantom mouse event. Without
-  #      this patch the controller stops working mid-match.
+  #      or the Deck's touch screen generates a phantom mouse event. This patch
+  #      prevents the controller from switching to KB/M mode.
   #
   #   3. controller_neptune_config.vdf — deploy the custom Steam Deck button
   #      layout (embedded in this script from cluckers/assets/). Skips if a
