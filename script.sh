@@ -10887,6 +10887,7 @@ XDLL_B64_EOF
   local real_wine_path=""
   local _is_proton="false"
   local _proton_search_dirs=(
+    "/usr/share/steam/compatibilitytools.d"
     "${HOME}/.steam/steam/compatibilitytools.d"
     "${HOME}/.local/share/Steam/compatibilitytools.d"
     "${HOME}/.steam/steam/steamapps/common"
@@ -10897,7 +10898,7 @@ XDLL_B64_EOF
     [[ -d "${_pdir}" ]] || continue
     # Pick the most-recently-modified Proton wine binary (any Proton variant).
     _candidate=$(
-      find "${_pdir}" -maxdepth 3 -name "wine" \
+      find "${_pdir}" -maxdepth 4 -name "wine" \
         -path "*/bin/wine" 2>/dev/null \
         | while IFS= read -r _w; do
             printf '%s %s\n' "$(stat -c %Y "${_w}" 2>/dev/null || echo 0)" "${_w}"
