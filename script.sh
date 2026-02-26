@@ -251,7 +251,7 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 
 # Installs missing system packages using the distro's package manager.
 #
-# Checks for: wine winetricks curl wget python3 unzip sha256sum.
+# Checks for: wine winetricks curl wget python3 unzip sha256sum cabextract.
 # Installs only what is absent. Supports apt, pacman, dnf, zypper.
 #
 # Arguments:
@@ -263,7 +263,7 @@ install_sys_deps() {
   local tool
 
   # Use pip3 as the check for pip.
-  for tool in wine winetricks curl wget python3 unzip sha256sum "$@"; do
+  for tool in wine winetricks curl wget python3 unzip sha256sum cabextract "$@"; do
     command_exists "${tool}" || to_install+=("${tool}")
   done
   
@@ -324,10 +324,12 @@ install_icoutils() {
 #   $1 - winetricks package identifier (e.g. "vcrun2022").
 #   $2 - Human-readable description for progress output.
 #   $3 - (Optional) Path to the Wine binary to use.
+#   $4 - (Optional) Path to the Wineserver binary to use.
 install_winetricks_pkg() {
   local -r pkg="$1"
   local -r desc="$2"
   local -r wine_path="${3:-wine}"
+  local -r wineserver_path="${4:-wineserver}"
   local -r log="${WINEPREFIX}/winetricks.log"
 
   if [[ -f "${log}" ]] && grep -qw "${pkg}" "${log}" 2>/dev/null; then
@@ -336,7 +338,9 @@ install_winetricks_pkg() {
   fi
 
   info_msg "Installing ${desc}..."
-  if WINE="${wine_path}" winetricks -q "${pkg}"; then
+  # Explicitly set WINE and WINESERVER to avoid hangs due to version mismatch.
+  # Suppress debug output to keep the log clean and avoid UI freezes.
+  if WINE="${wine_path}" WINESERVER="${wineserver_path}" WINEDEBUG="-all" winetricks -q "${pkg}"; then
     ok_msg "${desc} installed."
   else
     warn_msg "${pkg} install failed — continuing anyway."
@@ -957,7 +961,7 @@ ZIPBLAKE3EOF
   Expected: ${zip_blake3}
   Got:      ${actual_blake3}"
     else
-      ok_msg "BLAKE3 integrity verified."
+      ok_msg "Game download complete and verified successfully (BLAKE3)."
     fi
   fi
 
@@ -1486,14 +1490,17 @@ DECK_LAYOUT_EOF
 #   $1 - variable name to store the wine binary path
 #   $2 - variable name to store the is_proton boolean ("true"/"false")
 #   $3 - variable name to store the proton tool name
+#   $4 - variable name to store the wineserver binary path
 find_wine() {
   local -n _out_path=$1
   local -n _out_is_proton=$2
   local -n _out_tool_name=$3
+  local -n _out_server=$4
 
   _out_path=""
   _out_is_proton="false"
   _out_tool_name="proton"
+  _out_server="wineserver"
 
   local search_dirs=(
     "/usr/share/steam/compatibilitytools.d"
@@ -1578,6 +1585,8 @@ find_wine() {
         tool_dir=$(dirname "${tool_dir}")
     fi
     _out_tool_name=$(basename "${tool_dir}")
+    _out_server="$(dirname "${newest_proton}")/wineserver"
+    [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
     return 0
   fi
 
@@ -1604,6 +1613,8 @@ find_wine() {
     if [[ -n "${path}" ]] && [[ -x "${path}" ]]; then
       _out_path="${path}"
       _out_tool_name="wine"
+      _out_server="$(dirname "${path}")/wineserver"
+      [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
       return 0
     fi
   done
@@ -1640,6 +1651,7 @@ main() {
   # Step 8 (launcher creation). find_wine sets the variables passed as arguments.
   local _is_proton="false"
   local real_wine_path=""
+  local real_wineserver="wineserver"
   local _proton_tool_name="proton"
 
   local arg
@@ -1701,7 +1713,7 @@ main() {
 
   # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
   # Step 8 (launcher). find_wine sets the variables passed as arguments.
-  find_wine real_wine_path _is_proton _proton_tool_name || true
+  find_wine real_wine_path _is_proton _proton_tool_name real_wineserver || true
 
   # --------------------------------------------------------------------------
   # Step 1 — System tools
@@ -1875,6 +1887,7 @@ main() {
       #   DISPLAY=""                   — no X window for mono/gecko installers
       #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
       DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
+        WINE="${real_wine_path}" WINESERVER="${real_wineserver}" \
         "${real_wine_path}" wineboot --init 2>/dev/null || true
     fi
     ok_msg "Wine prefix created."
@@ -1884,8 +1897,8 @@ main() {
     info_msg "Applying WineBus SDL mapping for controllers..."
     # Forces Wine to use the SDL2 library instead of raw HID (fixes double-input/mapping).
     # See: https://wiki.winehq.org/Useful_Registry_Keys
-    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
-    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+    WINEPREFIX="${WINEPREFIX}" WINESERVER="${real_wineserver}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+    WINEPREFIX="${WINEPREFIX}" WINESERVER="${real_wineserver}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
   fi
 
   # --------------------------------------------------------------------------
@@ -1914,9 +1927,9 @@ main() {
   #
   # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
   # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
-  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${real_wine_path}"
-  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${real_wine_path}"
-  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${real_wine_path}"
+  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${real_wine_path}" "${real_wineserver}"
+  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${real_wine_path}" "${real_wineserver}"
+  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${real_wine_path}" "${real_wineserver}"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
@@ -1980,7 +1993,7 @@ BLAKE3EOF
   Got:      ${actual_blake3}
   Re-run the script to re-download."
       else
-        ok_msg "BLAKE3 integrity verified."
+        ok_msg "Game download complete and verified successfully (BLAKE3)."
       fi
     fi
 
@@ -11756,10 +11769,6 @@ XDLL_B64_EOF
   fi
 
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
-
-  local real_wineserver
-  real_wineserver="$(dirname "${real_wine_path}")/wineserver"
-  [[ ! -x "${real_wineserver}" ]] && real_wineserver="wineserver"
 
   # Part 1: setup-time values baked in as plain strings.
   cat > "${LAUNCHER_SCRIPT}" << EOF
