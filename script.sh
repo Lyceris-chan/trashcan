@@ -252,15 +252,9 @@ install_sys_deps() {
   local to_install=()
   local tool
 
+  # Use pip3 as the check for pip.
   for tool in wine winetricks curl wget python3 unzip sha256sum "$@"; do
-    if ! command_exists "${tool}"; then
-      # Handle package names that differ from command names
-      if [[ "${tool}" == "aria2c" ]]; then
-        to_install+=("aria2")
-      else
-        to_install+=("${tool}")
-      fi
-    fi
+    command_exists "${tool}" || to_install+=("${tool}")
   done
   
   # Explicitly check for pip / pip3.
@@ -649,6 +643,136 @@ PYEOF
 #  Main install
 # ==============================================================================
 
+# Downloads a file in parallel chunks using curl and range requests.
+# Retains resume support.
+#
+# Arguments:
+#   $1 - url: Direct download URL
+#   $2 - dest: Destination file path
+parallel_download() {
+  local url="$1"
+  local dest="$2"
+  local threads=8
+
+  # Get the total file size from the server
+  local size
+  size=$(curl -sI -L "$url" | grep -i 'Content-Length' | tail -n1 | awk '{print $2}' | tr -d '\r')
+
+  # If size is unknown or not a number, fallback to standard single-threaded curl
+  if [[ -z "$size" || ! "$size" =~ ^[0-9]+$ ]]; then
+    local resume_flag=""
+    if [[ -f "${dest}.partial" ]]; then
+      local partial_size
+      partial_size=$(stat -c%s "${dest}.partial" 2>/dev/null || echo 0)
+      info_msg "Resuming partial download (${partial_size} bytes)..."
+      resume_flag="-C -"
+    fi
+    curl -L --progress-bar ${resume_flag} -o "${dest}.partial" "$url" || return 1
+    mv "${dest}.partial" "$dest"
+    return 0
+  fi
+
+  local chunk_size=$(( size / threads ))
+  local pids=()
+  local i
+
+  for ((i=0; i<threads; i++)); do
+    local start=$(( i * chunk_size ))
+    local end=$(( (i+1) * chunk_size - 1 ))
+    if [[ $i -eq $((threads-1)) ]]; then
+      end=$(( size - 1 ))
+    fi
+    
+    local part_file="${dest}.part${i}"
+    local part_size=0
+    if [[ -f "$part_file" ]]; then
+      part_size=$(stat -c%s "$part_file" 2>/dev/null || echo 0)
+    fi
+    
+    local expected_part_size=$(( end - start + 1 ))
+    
+    if [[ $part_size -lt $expected_part_size ]]; then
+      local new_start=$(( start + part_size ))
+      # Download into a tmp file, then append. This ensures we can resume cleanly.
+      (
+        curl -s -L -f -r "${new_start}-${end}" -o "${part_file}.tmp" "$url" && \
+        cat "${part_file}.tmp" >> "$part_file" && \
+        rm -f "${part_file}.tmp"
+      ) &
+      pids+=($!)
+    elif [[ $part_size -gt $expected_part_size ]]; then
+      # If part is mysteriously larger, reset it.
+      rm -f "$part_file"
+      (
+        curl -s -L -f -r "${start}-${end}" -o "${part_file}.tmp" "$url" && \
+        cat "${part_file}.tmp" >> "$part_file" && \
+        rm -f "${part_file}.tmp"
+      ) &
+      pids+=($!)
+    fi
+  done
+  
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    # Show progress bar
+    while true; do
+      local current_size=0
+      for ((i=0; i<threads; i++)); do
+        local ps=0
+        if [[ -f "${dest}.part${i}" ]]; then
+          ps=$(stat -c%s "${dest}.part${i}" 2>/dev/null || echo 0)
+        fi
+        current_size=$(( current_size + ps ))
+        if [[ -f "${dest}.part${i}.tmp" ]]; then
+          local tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
+          current_size=$(( current_size + tmps ))
+        fi
+      done
+      
+      local percent=$(( current_size * 100 / size ))
+      local bar_length=40
+      local filled=$(( percent * bar_length / 100 ))
+      local empty=$(( bar_length - filled ))
+      local bar_str=$(printf "%${filled}s" | tr ' ' '#')
+      local empty_str=$(printf "%${empty}s" | tr ' ' '-')
+      
+      printf "\r  [INFO]  [%s%s] %d%% (%d / %d MB)   " "${bar_str}" "${empty_str}" "${percent}" "$((current_size / 1048576))" "$((size / 1048576))"
+      
+      local all_done=true
+      for pid in "${pids[@]}"; do
+        if kill -0 $pid 2>/dev/null; then
+          all_done=false
+          break
+        fi
+      done
+      
+      if $all_done; then
+        break
+      fi
+      sleep 1
+    done
+    printf "\n"
+    
+    # Wait and capture exit codes
+    local failed=false
+    for pid in "${pids[@]}"; do
+      wait $pid || failed=true
+    done
+    
+    if $failed; then
+      return 1
+    fi
+  fi
+  
+  # Concatenate files
+  rm -f "$dest"
+  for ((i=0; i<threads; i++)); do
+    cat "${dest}.part${i}" >> "$dest"
+    rm -f "${dest}.part${i}"
+  done
+  
+  return 0
+}
+
 # Checks for a newer game version and downloads it if available.
 # Skips all setup steps — only updates the game files in GAME_DIR.
 # Optionally applies game patches (Steam Deck or Controller) afterward.
@@ -790,34 +914,14 @@ DATBLAKE3EOF
 
   # ---- Download with resume --------------------------------------------------
   local zip_path="${GAME_DIR}/game.zip"
-  local partial_path="${zip_path}.partial"
   mkdir -p "${GAME_DIR}"
 
   info_msg "Downloading (~5.3 GB — this may take a while)..."
   info_msg "If interrupted, re-run with --update / -u to resume."
 
-  if command -v aria2c >/dev/null 2>&1; then
-    # Use aria2c for multi-threaded downloading
-    aria2c -c -x 16 -s 16 --console-log-level=error --summary-interval=1 \
-      -d "$(dirname "${partial_path}")" -o "$(basename "${partial_path}")" "${zip_url}" \
-      || error_exit "Download failed. Check your internet connection."
-  else
-    local resume_flag=""
-    if [[ -f "${partial_path}" ]]; then
-      local partial_size
-      partial_size=$(stat -c%s "${partial_path}")
-      info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
-      resume_flag="-C -"
-    fi
+  parallel_download "${zip_url}" "${zip_path}" \
+    || error_exit "Download failed. Check your internet connection."
 
-    # shellcheck disable=SC2086
-    # resume_flag is intentionally unquoted: it is either empty or "-C -"
-    curl -L --progress-bar ${resume_flag} \
-      -o "${partial_path}" "${zip_url}" \
-      || error_exit "Download failed. Check your internet connection."
-  fi
-
-  mv "${partial_path}" "${zip_path}"
   ok_msg "Download complete."
 
   # ---- BLAKE3 verification ---------------------------------------------------
@@ -1622,7 +1726,7 @@ main() {
     error_exit "No supported package manager found (apt / pacman / dnf / zypper)."
   fi
 
-  local -a extra_tools=("aria2c")
+  local -a extra_tools=()
   [[ "${use_gamescope}" == "true" ]] && extra_tools+=("gamescope")
   install_sys_deps "${pkg_mgr}" "${extra_tools[@]}"
 
@@ -1835,31 +1939,10 @@ main() {
     info_msg "If interrupted, re-run the script to resume from where it stopped."
 
     local zip_path="${GAME_DIR}/game.zip"
-    local partial_path="${zip_path}.partial"
 
-    if command -v aria2c >/dev/null 2>&1; then
-      # Use aria2c for multi-threaded downloading
-      aria2c -c -x 16 -s 16 --console-log-level=error --summary-interval=1 \
-        -d "$(dirname "${partial_path}")" -o "$(basename "${partial_path}")" "${zip_url}" \
-        || error_exit "Game download failed. Check your internet connection."
-    else
-      # Resume partial download if one exists.
-      local resume_flag=""
-      if [[ -f "${partial_path}" ]]; then
-        local partial_size
-        partial_size=$(stat -c%s "${partial_path}")
-        info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
-        resume_flag="-C -"
-      fi
+    parallel_download "${zip_url}" "${zip_path}" \
+      || error_exit "Game download failed. Check your internet connection."
 
-      # shellcheck disable=SC2086
-      # resume_flag is intentionally unquoted: it is either empty or "-C -"
-      curl -L --progress-bar ${resume_flag} \
-        -o "${partial_path}" "${zip_url}" \
-        || error_exit "Game download failed. Check your internet connection."
-    fi
-
-    mv "${partial_path}" "${zip_path}"
     ok_msg "Download complete."
 
     # Verify BLAKE3 hash using Python (bash has no native BLAKE3 support).
