@@ -391,6 +391,9 @@ install_winetricks_pkg() {
   fi
 
   info_msg "Installing ${desc}..."
+  # Clean up any hanging servers before starting winetricks.
+  WINEPREFIX="${WINEPREFIX}" "${wineserver_path}" -k 2>/dev/null || true
+
   # Explicitly set WINE and WINESERVER to avoid hangs due to version mismatch.
   # Suppress debug output to keep the log clean and avoid UI freezes.
   if WINE="${wine_path}" WINESERVER="${wineserver_path}" WINEDEBUG="-all" winetricks -q "${pkg}"; then
@@ -398,6 +401,9 @@ install_winetricks_pkg() {
   else
     warn_msg "${pkg} install failed — continuing anyway."
   fi
+  
+  # Clean up again after winetricks to ensure next step starts fresh.
+  WINEPREFIX="${WINEPREFIX}" "${wineserver_path}" -k 2>/dev/null || true
 }
 
 # ==============================================================================
@@ -1556,10 +1562,12 @@ find_wine() {
   local d p base major minor ver
   for d in "${search_dirs[@]}"; do
     if [[ ! -d "${d}" ]]; then continue; fi
-    if [[ "${d}" == *"-slr"* ]]; then continue; fi # Skip SLR directories
+    # Skip any directory that is clearly for Steam Linux Runtime (SLR).
+    case "${d,,}" in
+      *slr*|*steamlinuxruntime*) continue ;;
+    esac
 
     # 1. Check direct subdirectory (e.g., /opt/proton-cachyos/files/bin/wine64)
-    # or Lutris runners (e.g., .../lutris-ge-6.16-x86_64/bin/wine64)
     local direct_p=""
     if [[ -f "${d}/files/bin/wine64" ]]; then
         direct_p="${d}/files/bin/wine64"
@@ -1568,8 +1576,9 @@ find_wine() {
     fi
 
     if [[ -n "${direct_p}" ]]; then
-        # Quick sanity check: can this binary actually run? (Proton SLR builds often fail here)
-        if "${direct_p}" --version >/dev/null 2>&1; then
+        # Sanity check: Can this Wine actually run a basic command?
+        # SLR builds fail here because they lack the pressure-vessel environment.
+        if "${direct_p}" wineboot --version >/dev/null 2>&1; then
             if [[ -z "${newest_proton}" ]]; then
                 newest_proton="${direct_p}"
             fi
@@ -1579,7 +1588,11 @@ find_wine() {
     # 2. Check for common Proton and custom Wine prefixes
     # Use a broad glob to find GE-Proton, proton-cachyos, lutris-ge, etc.
     for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
-      if [[ "${p}" == *"-slr"* ]]; then continue; fi # Skip SLR builds
+      [[ -e "${p}" ]] || continue
+      # Skip SLR builds in the glob expansion.
+      case "${p,,}" in
+        *slr*|*steamlinuxruntime*) continue ;;
+      esac
       
       local wine_bin=""
       if [[ -f "${p}/files/bin/wine64" ]]; then
@@ -1589,8 +1602,8 @@ find_wine() {
       fi
 
       if [[ -n "${wine_bin}" ]]; then
-        # Sanity check before considering this version.
-        if ! "${wine_bin}" --version >/dev/null 2>&1; then
+        # Sanity check: Can it run wineboot? (More thorough than --version)
+        if ! "${wine_bin}" wineboot --version >/dev/null 2>&1; then
             continue
         fi
 
