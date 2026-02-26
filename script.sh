@@ -16,16 +16,16 @@
 #    ./cluckers-setup.sh --steam-deck    # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller    # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --show-movies   # opt-out: show intro movies          (-m)
-#    ./cluckers-setup.sh --update        # check for game update       (-U)
-#    ./cluckers-setup.sh --uninstall     # remove everything           (-u)
+#    ./cluckers-setup.sh --update        # check for game update       (-u)
+#    ./cluckers-setup.sh --uninstall     # remove everything           
 #    ./cluckers-setup.sh --help          # show this help message      (-h)
 #
 #  SHORT FLAGS
 #    -a  auto      -v  verbose      -g  gamescope      -d  steam-deck
-#    -c  controller -m  show-movies  -U  update    -u  uninstall      -h  help
+#    -c  controller -m  show-movies  -u  update    -h  help
 #
 #  UPDATE FLAG
-#    --update / -U checks the update server for a newer game version. Update
+#    --update / -u checks the update server for a newer game version. Update
 #    detection matches NeedsUpdate() in internal/game/version.go: the local
 #    GameVersion.dat BLAKE3 hash is compared against the server's value. If
 #    they differ, the new game zip is downloaded with resume support, verified,
@@ -352,7 +352,7 @@ fetch_version_info() {
   fi
 
   local check
-  check=$(python3 - "${VERSION_INFO_JSON}" << 'EOF'
+  if ! check=$(python3 - "${VERSION_INFO_JSON}" << 'EOF'
 import json, sys
 try:
     d = json.loads(sys.argv[1])
@@ -364,9 +364,11 @@ try:
 except Exception:
     sys.exit(1)
 EOF
-)
+  ); then
+    return 1
+  fi
 
-  if [[ $? -ne 0 ]] || [[ ! "${check}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ ! "${check}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     return 1
   fi
 }
@@ -794,7 +796,7 @@ DATBLAKE3EOF
   fi
 
   info_msg "Downloading (~5.3 GB — this may take a while)..."
-  info_msg "If interrupted, re-run with --update / -U to resume."
+  info_msg "If interrupted, re-run with --update / -u to resume."
 
   # shellcheck disable=SC2086
   # resume_flag is intentionally unquoted: it is either empty or "-C -"
@@ -841,8 +843,14 @@ ZIPBLAKE3EOF
 
   # ---- Extract in place -------------------------------------------------------
   info_msg "Extracting update (this may take several minutes)..."
-  unzip -q -o "${zip_path}" -d "${GAME_DIR}" \
-    || error_exit "Extraction failed. Re-run with --update to retry."
+  if command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xf "${zip_path}" -C "${GAME_DIR}" || error_exit "Extraction failed. Re-run with --update to retry."
+  elif command -v 7z >/dev/null 2>&1; then
+    7z x -y "${zip_path}" -o"${GAME_DIR}" >/dev/null || error_exit "Extraction failed. Re-run with --update to retry."
+  else
+    UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -q -o "${zip_path}" -d "${GAME_DIR}" \
+      || error_exit "Extraction failed. Re-run with --update to retry."
+  fi
   rm -f "${zip_path}"
   ok_msg "Game updated to ${target_version}."
 
@@ -1012,6 +1020,43 @@ DECK_DISPLAY_EOF
 
   # -- Input: remove phantom mouse-axis counters (Deck or Controller mode) ---
   if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
+    # CrossplayInputMethod fix to force gamepad (resolves "Unassigned" button issues)
+    # See: https://www.pcgamingwiki.com/wiki/Paladins#Controller_support and https://www.protondb.com/app/444090
+    info_msg "Patch: Forcing engine-level input to Gamepad (Controller mode)..."
+    ini="${config_dir}/RealmGame.ini"
+    if [[ -f "${ini}" ]]; then
+      chmod u+w "${ini}"
+      python3 - "${ini}" << 'ENGINE_OVERRIDE_EOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8", errors="replace") as f:
+    txt = f.read()
+
+patches = [
+    ("CrossplayInputMethod=ECIM_Keyboard", "CrossplayInputMethod=ECIM_Gamepad"),
+    ("CrossplayInputMethod=ECIM_None", "CrossplayInputMethod=ECIM_Gamepad")
+]
+changed = False
+for old, new in patches:
+    if old in txt:
+        txt = txt.replace(old, new)
+        changed = True
+
+# If neither is found, we might need to add it, but replacing existing is safer
+if "CrossplayInputMethod=ECIM_Gamepad" not in txt:
+    # Just in case it's missing entirely in [TgGame.TgGameProfile]
+    if "[TgGame.TgGameProfile]" in txt:
+        txt = txt.replace("[TgGame.TgGameProfile]", "[TgGame.TgGameProfile]\nCrossplayInputMethod=ECIM_Gamepad")
+        changed = True
+
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(txt)
+    print("  Patched RealmGame.ini (CrossplayInputMethod)")
+ENGINE_OVERRIDE_EOF
+    fi
+
     info_msg "Patch: Neutralizing phantom mouse-axis counters (Controller mode)..."
     # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
     # gamepad to KB/M mode whenever phantom mouse events arrive under Wine.
@@ -1118,7 +1163,7 @@ DECK_INPUT_EOF
     # Preserves any existing user-customised layout (never overwrites).
     # Source: deckconfig.go — deployDeckControllerLayout().
     local vdf_tmp
-    vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX.vdf)
+    vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX --suffix=.vdf)
     base64 -d << 'NEPTUNE_B64_EOF' > "${vdf_tmp}"
 ImNvbnRyb2xsZXJfbWFwcGluZ3MiCnsKCSJ2ZXJzaW9uIiAiMyIKCSJnYW1lIiAiUmVhbG0gUm95
 YWxlIChDbHVja2VycykiCgkidGl0bGUiICIjVGl0bGUiCgkiZGVzY3JpcHRpb24iICIjRGVzY3Jp
@@ -1480,8 +1525,8 @@ main() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      --uninstall|-u)    run_uninstall; exit 0 ;;
-      --update|-U)       do_update="true" ;;
+      --uninstall)       run_uninstall; exit 0 ;;
+      --update|-u)       do_update="true" ;;
       --verbose|-v)      verbose="true" ;;
       --auto|-a)         auto_mode="true" ;;
       --gamescope|-g)    use_gamescope="true" ;;
@@ -1549,6 +1594,12 @@ main() {
   # --------------------------------------------------------------------------
   step_msg "Step 1 — Checking system tools..."
 
+  if [[ -e /dev/uinput ]] && [[ ! -w /dev/uinput ]]; then
+    warn_msg "Access to /dev/uinput is restricted (systemd v258+ policy)."
+    info_msg "Solution: sudo groupadd -r uinput && sudo usermod -aG uinput \$USER"
+    info_msg "More info: https://gitlab.archlinux.org/archlinux/packaging/packages/systemd/-/issues/31"
+  fi
+
   local pkg_mgr=""
   if   command_exists apt;    then pkg_mgr="apt"
   elif command_exists pacman; then pkg_mgr="pacman"
@@ -1574,14 +1625,14 @@ main() {
   #   vdf      — reads/writes Steam's binary config files (shortcuts.vdf etc.)
   #   blake3   — computes hashes for game file integrity verification
   
-  # Ensure pip is available.
+  # Ensure pip is available. Prefer python3 -m pip for reliability.
   local pip_cmd=""
-  if command_exists pip; then
-    pip_cmd="pip"
+  if python3 -m pip --version > /dev/null 2>&1; then
+    pip_cmd="python3 -m pip"
   elif command_exists pip3; then
     pip_cmd="pip3"
-  elif python3 -m pip --version > /dev/null 2>&1; then
-    pip_cmd="python3 -m pip"
+  elif command_exists pip; then
+    pip_cmd="pip"
   else
     info_msg "Python 'pip' module not found. Attempting to install via ensurepip..."
     python3 -m ensurepip --user > /dev/null 2>&1 || true
@@ -1711,6 +1762,14 @@ main() {
     ok_msg "Wine prefix created."
   fi
 
+  if [[ "${controller_mode}" == "true" ]]; then
+    info_msg "Applying WineBus SDL mapping for controllers..."
+    # Forces Wine to use the SDL2 library instead of raw HID (fixes double-input/mapping).
+    # See: https://wiki.winehq.org/Useful_Registry_Keys
+    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+  fi
+
   # --------------------------------------------------------------------------
   # Step 4 — Windows runtime libraries
   #
@@ -1823,8 +1882,14 @@ BLAKE3EOF
 
     # Extract the zip.
     info_msg "Extracting game files (this may take several minutes)..."
-    unzip -q -o "${zip_path}" -d "${GAME_DIR}" \
-      || error_exit "Extraction failed. Try re-running to re-download."
+    if command -v bsdtar >/dev/null 2>&1; then
+      bsdtar -xf "${zip_path}" -C "${GAME_DIR}" || error_exit "Extraction failed. Try re-running to re-download."
+    elif command -v 7z >/dev/null 2>&1; then
+      7z x -y "${zip_path}" -o"${GAME_DIR}" >/dev/null || error_exit "Extraction failed. Try re-running to re-download."
+    else
+      UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -q -o "${zip_path}" -d "${GAME_DIR}" \
+        || error_exit "Extraction failed. Try re-running to re-download."
+    fi
     rm -f "${zip_path}"
     ok_msg "Game files extracted to ${GAME_DIR}"
   fi
@@ -11798,9 +11863,10 @@ if not username or not password:
         tty_r.close()
         tty_w.close()
     os.makedirs(os.path.dirname(creds_file), exist_ok=True)
-    with open(creds_file, "w") as f:
+    def secure_opener(path, flags):
+        return os.open(path, flags, 0o600)
+    with open(creds_file, "w", opener=secure_opener) as f:
         f.write(f"{username}:{password}")
-    os.chmod(creds_file, 0o600)
 
 # Login - mirrors auth.Login() in internal/auth/login.go.
 try:
