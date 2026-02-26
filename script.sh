@@ -251,6 +251,59 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 
 # Installs missing system packages using the distro's package manager.
 #
+# Returns 0 if the local game matches the version info on the server.
+#
+# Arguments:
+#   $1 - dat_path_rel: Relative path to GameVersion.dat.
+#   $2 - dat_blake3: Expected BLAKE3 hash from the server.
+is_game_up_to_date() {
+  local dat_path_rel="$1"
+  local dat_blake3="$2"
+
+  local local_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
+  if [[ ! -f "${local_game_exe}" ]]; then
+    return 1
+  fi
+
+  if [[ -z "${dat_path_rel}" || -z "${dat_blake3}" ]]; then
+    ok_msg "Game files found (version info missing; deep integrity check skipped)."
+    return 0
+  fi
+
+  local local_dat="${GAME_DIR}/${dat_path_rel}"
+  if [[ ! -f "${local_dat}" ]]; then
+    ok_msg "Game files found but version data is missing — assuming update needed."
+    return 1
+  fi
+
+  info_msg "Checking local GameVersion.dat (${local_dat})..."
+  local local_dat_hash
+  local_dat_hash=$(python3 - "${local_dat}" << 'DATBLAKE3EOF'
+import sys
+try:
+    from blake3 import blake3 as b3
+    h = b3()
+    with open(sys.argv[1], "rb") as f:
+        h.update(f.read())
+    print(h.hexdigest())
+except ImportError:
+    print("skip")
+DATBLAKE3EOF
+  ) || local_dat_hash="skip"
+
+  if [[ "${local_dat_hash}" == "skip" ]]; then
+    ok_msg "Game files found, but deep integrity verification was skipped (blake3 missing)."
+    return 0
+  fi
+
+  if [[ "${local_dat_hash}" == "${dat_blake3}" ]]; then
+    ok_msg "Game version verified successfully (BLAKE3 match)."
+    return 0
+  fi
+
+  return 1
+}
+
 # Checks for: wine winetricks curl wget python3 unzip sha256sum cabextract.
 # Installs only what is absent. Supports apt, pacman, dnf, zypper.
 #
@@ -883,35 +936,7 @@ run_update() {
   # Mirrors NeedsUpdate() in internal/game/version.go:
   #   Read local GameVersion.dat, compute BLAKE3, compare to server value.
   # Falls back to "needs update" if the file is absent or unreadable.
-  local needs_update="true"
-  if [[ -n "${dat_path_rel}" ]] && [[ -n "${dat_blake3}" ]]; then
-    local local_dat="${GAME_DIR}/${dat_path_rel}"
-    if [[ -f "${local_dat}" ]]; then
-      info_msg "Checking local GameVersion.dat (${local_dat})..."
-      local local_dat_hash
-      local_dat_hash=$(python3 - "${local_dat}" << 'DATBLAKE3EOF'
-import sys
-try:
-    from blake3 import blake3 as b3
-    h = b3()
-    with open(sys.argv[1], "rb") as f:
-        h.update(f.read())
-    print(h.hexdigest())
-except ImportError:
-    print("skip")
-DATBLAKE3EOF
-      ) || local_dat_hash="skip"
-
-      if [[ "${local_dat_hash}" == "skip" ]]; then
-        warn_msg "blake3 module not available — cannot compare GameVersion.dat hashes."
-        warn_msg "Assuming update is needed."
-      elif [[ "${local_dat_hash}" == "${dat_blake3}" ]]; then
-        needs_update="false"
-      fi
-    fi
-  fi
-
-  if [[ "${needs_update}" == "false" ]]; then
+  if is_game_up_to_date "${dat_path_rel}" "${dat_blake3}"; then
     ok_msg "Game is already up to date (${target_version})."
     ok_msg "Game version verified successfully."
     return 0
@@ -1845,12 +1870,16 @@ main() {
 
   local zip_url=""
   local zip_blake3=""
+  local dat_path_rel=""
+  local dat_blake3=""
 
   if fetch_version_info; then
     local server_version
     server_version=$(parse_version_field "latest_version")
     zip_url=$(parse_version_field "zip_url")
     zip_blake3=$(parse_version_field "zip_blake3")
+    dat_path_rel=$(parse_version_field "gameversion_dat_path")
+    dat_blake3=$(parse_version_field "gameversion_dat_blake3")
     ok_msg "Server reports latest version: ${server_version}"
 
     if [[ "${resolved_version}" == "auto" ]]; then
@@ -1860,6 +1889,8 @@ main() {
       ok_msg "Using pinned version: ${resolved_version}"
       zip_url="https://updater.realmhub.io/builds/game-${resolved_version}.zip"
       zip_blake3=""
+      dat_path_rel=""
+      dat_blake3=""
     fi
   else
     warn_msg "Could not reach update server."
@@ -1872,6 +1903,8 @@ main() {
 
   ok_msg "Game version: ${resolved_version}"
   ok_msg "Download URL: ${zip_url}"
+
+  is_game_up_to_date "${dat_path_rel}" "${dat_blake3}" || true
 
   # --------------------------------------------------------------------------
   # Step 3 — Create Wine prefix
@@ -1977,8 +2010,7 @@ main() {
 
   local local_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
   if [[ -f "${local_game_exe}" ]]; then
-    ok_msg "Game files already present at ${GAME_DIR} — skipping download."
-    ok_msg "Game verified (using existing installation; deep integrity check skipped)."
+    ok_msg "Game files already present — skipping download."
   else
     info_msg "Downloading game zip from ${zip_url}"
     info_msg "(This is ~5.3 GB — it may take a while on slower connections.)"
