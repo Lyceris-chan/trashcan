@@ -12195,10 +12195,18 @@ EOF
   ok_msg "Desktop shortcut created at: ${DESKTOP_FILE}"
 
   # --------------------------------------------------------------------------
+  # Step 10 — Steam integration (optional)
+  #
+  # Adds Cluckers Central to Steam as a non-Steam game shortcut so you can
+  # launch it from your Steam library and access the Steam overlay and
+  # controller configurator.
+  #
+  # Steam must be closed before we write its config files. If Steam is running
+  # the changes will be overwritten when Steam exits.
+  # --------------------------------------------------------------------------
   step_msg "Step 10 — Configuring Steam integration (optional)..."
 
   local steam_root=""
-  local skip_steam="false"
 
   # Check if Steam is running. Steam must be closed to write to shortcuts.vdf reliably.
   if pgrep -x "steam" > /dev/null; then
@@ -12206,18 +12214,12 @@ EOF
     warn_msg "To ensure the shortcut is added correctly, please close Steam and re-run this script."
     warn_msg "Otherwise, Steam may overwrite the changes upon exit."
     if [[ "${auto_mode}" == "false" ]]; then
-      printf "  Continue anyway? [y/N] "
-      local answer=""
-      read -r answer
-      if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
-        info_msg "Skipping Steam integration (user requested)."
-        skip_steam="true"
-      fi
+      printf "  Press Enter to continue anyway or Ctrl+C to stop... "
+      read -r
     fi
   fi
 
-  if [[ "${skip_steam}" == "false" ]]; then
-    local candidate
+  local candidate
   for candidate in \
     "${HOME}/.steam/steam" \
     "${HOME}/.local/share/Steam" \
@@ -12347,11 +12349,10 @@ except Exception as exc:  # pylint: disable=broad-except
 PYEOF
     fi
   fi
-fi
 
-# --------------------------------------------------------------------------
-# Install complete
-# --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # Install complete
+  # --------------------------------------------------------------------------
   printf "\n"
   # --------------------------------------------------------------------------
   # Step 11 — Game patches (Steam Deck, Controller, or Skip Movies)
