@@ -664,14 +664,14 @@ parallel_download() {
 
   # If size is unknown or not a number, fallback to standard single-threaded curl
   if [[ -z "$size" || ! "$size" =~ ^[0-9]+$ ]]; then
-    local resume_flag=""
+    local -a curl_args=("-L" "--progress-bar")
     if [[ -f "${dest}.partial" ]]; then
       local partial_size
       partial_size=$(stat -c%s "${dest}.partial" 2>/dev/null || echo 0)
       info_msg "Resuming partial download (${partial_size} bytes)..."
-      resume_flag="-C -"
+      curl_args+=("-C" "-")
     fi
-    curl -L --progress-bar ${resume_flag} -o "${dest}.partial" "$url" || return 1
+    curl "${curl_args[@]}" -o "${dest}.partial" "$url" || return 1
     mv "${dest}.partial" "$dest"
     return 0
   fi
@@ -727,7 +727,8 @@ parallel_download() {
         fi
         current_size=$(( current_size + ps ))
         if [[ -f "${dest}.part${i}.tmp" ]]; then
-          local tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
+          local tmps
+          tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
           current_size=$(( current_size + tmps ))
         fi
       done
@@ -736,14 +737,16 @@ parallel_download() {
       local bar_length=40
       local filled=$(( percent * bar_length / 100 ))
       local empty=$(( bar_length - filled ))
-      local bar_str=$(printf "%${filled}s" | tr ' ' '#')
-      local empty_str=$(printf "%${empty}s" | tr ' ' '-')
+      local bar_str
+      bar_str=$(printf "%${filled}s" | tr ' ' '#')
+      local empty_str
+      empty_str=$(printf "%${empty}s" | tr ' ' '-')
       
       printf "\r  [INFO]  [%s%s] %d%% (%d / %d MB)   " "${bar_str}" "${empty_str}" "${percent}" "$((current_size / 1048576))" "$((size / 1048576))"
       
       local all_done=true
       for pid in "${pids[@]}"; do
-        if kill -0 $pid 2>/dev/null; then
+        if kill -0 "$pid" 2>/dev/null; then
           all_done=false
           break
         fi
@@ -759,7 +762,7 @@ parallel_download() {
     # Wait and capture exit codes
     local failed=false
     for pid in "${pids[@]}"; do
-      wait $pid || failed=true
+      wait "$pid" || failed=true
     done
     
     if $failed; then
@@ -12211,10 +12214,10 @@ EOF
   # Check if Steam is running. Steam must be closed to write to shortcuts.vdf reliably.
   if pgrep -x "steam" > /dev/null; then
     warn_msg "Steam is currently running."
-    warn_msg "To ensure the shortcut is added correctly, please close Steam and re-run this script."
-    warn_msg "Otherwise, Steam may overwrite the changes upon exit."
+    info_msg "Please exit Steam fully (Steam > Exit) to ensure the shortcut is added correctly."
+    info_msg "If Steam remains open, it may overwrite these changes when it eventually closes."
     if [[ "${auto_mode}" == "false" ]]; then
-      printf "  Press Enter to continue anyway or Ctrl+C to stop... "
+      printf "  Once you have closed Steam, press Enter to continue (or Ctrl+C to abort)... "
       read -r
     fi
   fi
