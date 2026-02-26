@@ -252,9 +252,15 @@ install_sys_deps() {
   local to_install=()
   local tool
 
-  # Use pip3 as the check for pip.
   for tool in wine winetricks curl wget python3 unzip sha256sum "$@"; do
-    command_exists "${tool}" || to_install+=("${tool}")
+    if ! command_exists "${tool}"; then
+      # Handle package names that differ from command names
+      if [[ "${tool}" == "aria2c" ]]; then
+        to_install+=("aria2")
+      else
+        to_install+=("${tool}")
+      fi
+    fi
   done
   
   # Explicitly check for pip / pip3.
@@ -787,22 +793,29 @@ DATBLAKE3EOF
   local partial_path="${zip_path}.partial"
   mkdir -p "${GAME_DIR}"
 
-  local resume_flag=""
-  if [[ -f "${partial_path}" ]]; then
-    local partial_size
-    partial_size=$(stat -c%s "${partial_path}")
-    info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
-    resume_flag="-C -"
-  fi
-
   info_msg "Downloading (~5.3 GB — this may take a while)..."
   info_msg "If interrupted, re-run with --update / -u to resume."
 
-  # shellcheck disable=SC2086
-  # resume_flag is intentionally unquoted: it is either empty or "-C -"
-  curl -L --progress-bar ${resume_flag} \
-    -o "${partial_path}" "${zip_url}" \
-    || error_exit "Download failed. Check your internet connection."
+  if command -v aria2c >/dev/null 2>&1; then
+    # Use aria2c for multi-threaded downloading
+    aria2c -c -x 16 -s 16 --console-log-level=error --summary-interval=1 \
+      -d "$(dirname "${partial_path}")" -o "$(basename "${partial_path}")" "${zip_url}" \
+      || error_exit "Download failed. Check your internet connection."
+  else
+    local resume_flag=""
+    if [[ -f "${partial_path}" ]]; then
+      local partial_size
+      partial_size=$(stat -c%s "${partial_path}")
+      info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
+      resume_flag="-C -"
+    fi
+
+    # shellcheck disable=SC2086
+    # resume_flag is intentionally unquoted: it is either empty or "-C -"
+    curl -L --progress-bar ${resume_flag} \
+      -o "${partial_path}" "${zip_url}" \
+      || error_exit "Download failed. Check your internet connection."
+  fi
 
   mv "${partial_path}" "${zip_path}"
   ok_msg "Download complete."
@@ -1609,7 +1622,7 @@ main() {
     error_exit "No supported package manager found (apt / pacman / dnf / zypper)."
   fi
 
-  local -a extra_tools=()
+  local -a extra_tools=("aria2c")
   [[ "${use_gamescope}" == "true" ]] && extra_tools+=("gamescope")
   install_sys_deps "${pkg_mgr}" "${extra_tools[@]}"
 
@@ -1824,20 +1837,27 @@ main() {
     local zip_path="${GAME_DIR}/game.zip"
     local partial_path="${zip_path}.partial"
 
-    # Resume partial download if one exists.
-    local resume_flag=""
-    if [[ -f "${partial_path}" ]]; then
-      local partial_size
-      partial_size=$(stat -c%s "${partial_path}")
-      info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
-      resume_flag="-C -"
-    fi
+    if command -v aria2c >/dev/null 2>&1; then
+      # Use aria2c for multi-threaded downloading
+      aria2c -c -x 16 -s 16 --console-log-level=error --summary-interval=1 \
+        -d "$(dirname "${partial_path}")" -o "$(basename "${partial_path}")" "${zip_url}" \
+        || error_exit "Game download failed. Check your internet connection."
+    else
+      # Resume partial download if one exists.
+      local resume_flag=""
+      if [[ -f "${partial_path}" ]]; then
+        local partial_size
+        partial_size=$(stat -c%s "${partial_path}")
+        info_msg "Resuming partial download (${partial_size} bytes already downloaded)..."
+        resume_flag="-C -"
+      fi
 
-    # shellcheck disable=SC2086
-    # resume_flag is intentionally unquoted: it is either empty or "-C -"
-    curl -L --progress-bar ${resume_flag} \
-      -o "${partial_path}" "${zip_url}" \
-      || error_exit "Game download failed. Check your internet connection."
+      # shellcheck disable=SC2086
+      # resume_flag is intentionally unquoted: it is either empty or "-C -"
+      curl -L --progress-bar ${resume_flag} \
+        -o "${partial_path}" "${zip_url}" \
+        || error_exit "Game download failed. Check your internet connection."
+    fi
 
     mv "${partial_path}" "${zip_path}"
     ok_msg "Download complete."
