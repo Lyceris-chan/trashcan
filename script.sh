@@ -12281,6 +12281,8 @@ EOF
     warn_msg "To add manually: add ${LAUNCHER_SCRIPT} as a non-Steam game in Steam."
   elif ! command_exists python3; then
     warn_msg "Python 3 not available — skipping Steam integration."
+  elif ! python3 -c "import vdf" >/dev/null 2>&1; then
+    warn_msg "Python 'vdf' library not available (skipped installation) — skipping Steam integration."
   else
     local steam_userdata="${steam_root}/userdata"
     local steam_user=""
