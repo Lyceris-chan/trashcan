@@ -2156,27 +2156,37 @@ find_wine() {
         
         # Test if the Wine binary can actually run a simple command.
         # This filters out SLR builds that fail outside Steam Runtime.
-        local lib_add
-        lib_add=$(get_wine_env_additions "${check_exe}")
-        lib_add="${lib_add#*|}" # Get just the libs part
-        lib_add="${lib_add%%|*}"
+        # We use a temp prefix and skip Mono/Gecko to avoid "Taking ages".
+        local env_adds bin_add lib_add loader_add
+        env_adds=$(get_wine_env_additions "${check_exe}")
+        bin_add="${env_adds%%|*}"; temp_adds="${env_adds#*|}"; 
+        lib_add="${temp_adds%%|*}"; loader_add="${env_adds##*|}"
         
-        if ! env LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        local check_pfx
+        check_pfx=$(mktemp -d /tmp/cluckers_pfx_check_XXXXXX)
+        if env WINEPREFIX="${check_pfx}" \
+           PATH="${bin_add}:${PATH}" \
+           LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+           WINELOADER="${loader_add}" \
+           WINEDLLOVERRIDES="mscoree,mshtml=" \
+           DISPLAY="" \
            "${check_exe}" cmd.exe /c exit >/dev/null 2>&1; then
-          continue
-        fi
-
-        # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
-        if [[ "${base}" =~ GE-Proton([0-9]+)-([0-9]+) ]]; then
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          ver=$(printf "%05d-%05d" "${major}" "${minor}")
-          if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
-            newest_version="${ver}"
+          rm -rf "${check_pfx}"
+          # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
+          if [[ "${base}" =~ GE-Proton([0-9]+)-([0-9]+) ]]; then
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            ver=$(printf "%05d-%05d" "${major}" "${minor}")
+            if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
+              newest_version="${ver}"
+              newest_proton="${check_exe}"
+            fi
+          elif [[ -z "${newest_proton}" ]]; then
             newest_proton="${check_exe}"
           fi
-        elif [[ -z "${newest_proton}" ]]; then
-          newest_proton="${check_exe}"
+        else
+          rm -rf "${check_pfx}"
+          continue
         fi
       fi
     done
@@ -2225,13 +2235,32 @@ find_wine() {
     fi
 
     if [[ -n "${path}" ]] && [[ -x "${path}" ]]; then
-      _out_path="${path}"
-      _out_tool_name="wine"
+      # Verification test for system wine
+      local env_adds bin_add lib_add loader_add
+      env_adds=$(get_wine_env_additions "${path}")
+      bin_add="${env_adds%%|*}"; temp_adds="${env_adds#*|}"; 
+      lib_add="${temp_adds%%|*}"; loader_add="${env_adds##*|}"
+      
+      local check_pfx
+      check_pfx=$(mktemp -d /tmp/cluckers_pfx_check_XXXXXX)
+      if env WINEPREFIX="${check_pfx}" \
+         PATH="${bin_add}:${PATH}" \
+         LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+         WINELOADER="${loader_add}" \
+         WINEDLLOVERRIDES="mscoree,mshtml=" \
+         DISPLAY="" \
+         "${path}" cmd.exe /c exit >/dev/null 2>&1; then
+        rm -rf "${check_pfx}"
+        _out_path="${path}"
+        _out_tool_name="wine"
 
-      # Set the wineserver path associated with this Wine binary
-      _out_server="$(dirname "${path}")/wineserver"
-      [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
-      return 0
+        # Set the wineserver path associated with this Wine binary
+        _out_server="$(dirname "${path}")/wineserver"
+        [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
+        return 0
+      else
+        rm -rf "${check_pfx}"
+      fi
     fi
   done
 
