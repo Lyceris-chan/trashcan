@@ -903,7 +903,8 @@ install_winetricks_multi() {
     empty_str=$(printf "%${empty}s" | tr ' ' '-')
     
     # Try to find what's currently executing from the output.
-    current_verb=$(grep "Executing" "${wt_out}" | tail -n1 | sed 's/.*load_//; s/ .*//' | cut -c1-15)
+    # Use a subshell with set +e to safely extract the verb without triggering pipefail.
+    current_verb=$(set +e; grep "Executing" "${wt_out}" 2>/dev/null | tail -n1 | sed 's/.*load_//; s/ .*//' | cut -c1-15)
     [[ -z "${current_verb}" ]] && current_verb="initialising"
 
     printf "\r  %b[PROG]%b  [%s%s] %d%% (%d/%d) %-15s [%c]" \
@@ -912,8 +913,10 @@ install_winetricks_multi() {
     
     sleep 0.5
   done
+  set +e
   wait "${wt_pid}"
   local wt_status=$?
+  set -e
   printf "\r"
   # Clear the progress line.
   printf "                                                                                \r"
