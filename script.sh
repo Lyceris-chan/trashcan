@@ -326,6 +326,8 @@ install_icoutils() {
 install_winetricks_pkg() {
   local -r pkg="$1"
   local -r desc="$2"
+  local -r maint_wine="${3:-wine}"
+  local -r maint_server="${4:-wineserver}"
   local -r log="${WINEPREFIX}/winetricks.log"
 
   if [[ -f "${log}" ]] && grep -qw "${pkg}" "${log}" 2>/dev/null; then
@@ -334,11 +336,19 @@ install_winetricks_pkg() {
   fi
 
   info_msg "Installing ${desc}..."
-  if winetricks -q "${pkg}"; then
+  # Ensure no orphaned wineservers are running before winetricks.
+  WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
+  
+  if WINE="${maint_wine}" WINESERVER="${maint_server}" winetricks -q "${pkg}"; then
     ok_msg "${desc} installed."
+    # Log the successful installation so we can skip it next time.
+    echo "${pkg}" >> "${log}"
   else
     warn_msg "${pkg} install failed — continuing anyway."
   fi
+
+  # Cleanup after winetricks.
+  WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 }
 
 # ==============================================================================
@@ -1521,25 +1531,19 @@ find_wine() {
 
     # 1. Check direct subdirectory (e.g., /opt/proton-cachyos/files/bin/wine64)
     # or Lutris runners (e.g., .../lutris-ge-6.16-x86_64/bin/wine64)
-    if [[ ! "${d}" == *"SteamLinuxRuntime"* ]] && [[ ! "${d}" == *"SLR"* ]]; then
-        if [[ -f "${d}/files/bin/wine64" ]]; then
-            if [[ -z "${newest_proton}" ]]; then
-                newest_proton="${d}/files/bin/wine64"
-            fi
-        elif [[ -f "${d}/bin/wine64" ]]; then
-            if [[ -z "${newest_proton}" ]]; then
-                newest_proton="${d}/bin/wine64"
-            fi
+    if [[ -f "${d}/files/bin/wine64" ]]; then
+        if [[ -z "${newest_proton}" ]]; then
+            newest_proton="${d}/files/bin/wine64"
+        fi
+    elif [[ -f "${d}/bin/wine64" ]]; then
+        if [[ -z "${newest_proton}" ]]; then
+            newest_proton="${d}/bin/wine64"
         fi
     fi
 
     # 2. Check for common Proton and custom Wine prefixes
     # Use a broad glob to find GE-Proton, proton-cachyos, lutris-ge, etc.
     for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
-      [[ -e "${p}" ]] || continue
-      [[ "${p}" == *"SteamLinuxRuntime"* ]] && continue
-      [[ "${p}" == *"SLR"* ]] && continue
-      
       if [[ -f "${p}/files/bin/wine64" ]]; then
         base=$(basename "${p}")
         # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
@@ -1548,17 +1552,26 @@ find_wine() {
           minor="${BASH_REMATCH[2]}"
           ver=$(printf "%05d-%05d" "${major}" "${minor}")
           if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
-            newest_version="${ver}"
-            newest_proton="${p}/files/bin/wine64"
+            # Sanity check: Can this Wine actually run a basic command?
+            # 10s timeout to prevent hangs.
+            if timeout 10s "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+              newest_version="${ver}"
+              newest_proton="${p}/files/bin/wine64"
+            fi
           fi
         elif [[ -z "${newest_proton}" ]]; then
           # Fallback for other Protons without standard GE versioning
-          newest_proton="${p}/files/bin/wine64"
+          # Sanity check: Can this Wine actually run a basic command?
+          if timeout 10s "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+            newest_proton="${p}/files/bin/wine64"
+          fi
         fi
       elif [[ -f "${p}/bin/wine64" ]]; then
         # Handle versions that don't use 'files' subfolder (e.g. some Lutris/Bottles runners)
         if [[ -z "${newest_proton}" ]]; then
-          newest_proton="${p}/bin/wine64"
+          if timeout 10s "${p}/bin/wine64" wineboot --version >/dev/null 2>&1; then
+            newest_proton="${p}/bin/wine64"
+          fi
         fi
       fi
     done
@@ -1579,6 +1592,10 @@ find_wine() {
         tool_dir=$(dirname "${tool_dir}")
     fi
     _out_tool_name=$(basename "${tool_dir}")
+    
+    # Set the wineserver path associated with this Wine binary
+    _out_server="$(dirname "${newest_proton}")/wineserver"
+    [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
     return 0
   fi
 
@@ -1605,6 +1622,10 @@ find_wine() {
     if [[ -n "${path}" ]] && [[ -x "${path}" ]]; then
       _out_path="${path}"
       _out_tool_name="wine"
+      
+      # Set the wineserver path associated with this Wine binary
+      _out_server="$(dirname "${path}")/wineserver"
+      [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
       return 0
     fi
   done
@@ -1641,6 +1662,7 @@ main() {
   # Step 8 (launcher creation). find_wine sets the variables passed as arguments.
   local _is_proton="false"
   local real_wine_path=""
+  local real_wineserver="wineserver"
   local _proton_tool_name="proton"
 
   local arg
@@ -1702,7 +1724,25 @@ main() {
 
   # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
   # Step 8 (launcher). find_wine sets the variables passed as arguments.
-  find_wine real_wine_path _is_proton _proton_tool_name || true
+  find_wine real_wine_path _is_proton _proton_tool_name real_wineserver || true
+
+  # Maintenance Wine: Used for winetricks and wineboot (prefix setup).
+  # SLR Proton builds cannot run standalone and cause hangs in these steps.
+  # We prefer a standalone-functional Wine for maintenance.
+  local maint_wine="wine"
+  local maint_server="wineserver"
+
+  if [[ -n "${real_wine_path}" ]] && timeout 10s "${real_wine_path}" wineboot --version >/dev/null 2>&1; then
+    # The detected Wine is standalone-functional (e.g. GE-Proton or system Wine).
+    maint_wine="${real_wine_path}"
+    maint_server="${real_wineserver}"
+  else
+    # The detected Wine is likely SLR Proton or missing. Fallback to system Wine.
+    if command_exists wine; then
+      maint_wine=$(command -v wine)
+      maint_server=$(command -v wineserver || echo "wineserver")
+    fi
+  fi
 
   # --------------------------------------------------------------------------
   # Step 1 — System tools
@@ -1876,7 +1916,8 @@ main() {
       #   DISPLAY=""                   — no X window for mono/gecko installers
       #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
       DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
-        "${real_wine_path}" wineboot --init 2>/dev/null || true
+        WINE="${maint_wine}" WINESERVER="${maint_server}" \
+        "${maint_wine}" wineboot --init 2>/dev/null || true
     fi
     ok_msg "Wine prefix created."
   fi
@@ -1885,8 +1926,8 @@ main() {
     info_msg "Applying WineBus SDL mapping for controllers..."
     # Forces Wine to use the SDL2 library instead of raw HID (fixes double-input/mapping).
     # See: https://wiki.winehq.org/Useful_Registry_Keys
-    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
-    WINEPREFIX="${WINEPREFIX}" "${real_wine_path}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+    WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_wine}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
+    WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_wine}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f >/dev/null 2>&1 || true
   fi
 
   # --------------------------------------------------------------------------
@@ -1905,6 +1946,9 @@ main() {
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
+  # Ensure no orphaned wineservers are running from previous steps/runs.
+  WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
+
   # Packages match verify.go RepairInstructions exactly:
   #   vcrun2022  — Visual C++ 2010-2022 Redistributable (superset of all prior)
   #   dxvk       — Vulkan-backed d3d8/d3d9/d3d10/d3d11/dxgi DLLs. Provides
@@ -1915,9 +1959,9 @@ main() {
   #
   # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
   # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
-  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable"
-  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"
-  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)"
+  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${maint_wine}" "${maint_server}"
+  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${maint_wine}" "${maint_server}"
+  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${maint_wine}" "${maint_server}"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
