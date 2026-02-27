@@ -138,17 +138,22 @@ GAMESCOPE_ARGS="gamescope --force-grab-cursor -W 1920 -H 1080 -r 240 --adaptive-
 #  Constants  (readonly — cannot be changed at runtime)
 # ==============================================================================
 
+# Root directory for all Cluckers-related data.
+readonly CLUCKERS_ROOT="${HOME}/.cluckers"
+
 # Wine prefix: a self-contained fake Windows environment created just for this
 # game. Think of it as a tiny, isolated Windows installation that lives inside
 # your home folder. It does not affect the rest of your Linux system at all.
 # To uninstall the game completely, delete this directory (the --uninstall flag
 # does this for you).
-readonly WINEPREFIX="${HOME}/.cluckers/prefix"
+# We use the 'pfx' name to match Proton's internal directory structure, which
+# improves compatibility with some Proton tools.
+readonly WINEPREFIX="${CLUCKERS_ROOT}/pfx"
 
 # Directory where extra Python packages used by this script are installed.
 # Packages go here instead of system-wide to avoid needing sudo or affecting
 # other Python programs on your system.
-readonly CLUCKERS_PYLIBS="${HOME}/.cluckers/pylibs"
+readonly CLUCKERS_PYLIBS="${CLUCKERS_ROOT}/pylibs"
 export PYTHONPATH="${CLUCKERS_PYLIBS}:${PYTHONPATH:-}"
 
 # The launcher script written to ~/.local/bin/ during setup. This is the small
@@ -170,7 +175,7 @@ readonly APP_NAME="Cluckers Central"
 readonly UPDATER_URL="https://updater.realmhub.io/builds/version.json"
 
 # Directory where game files are downloaded and extracted.
-readonly GAME_DIR="${HOME}/.cluckers/game"
+readonly GAME_DIR="${CLUCKERS_ROOT}/game"
 
 # Path to the game executable, relative to GAME_DIR.
 # "ShippingPC-RealmGameNoEditor.exe" is the standard name for a shipped (retail)
@@ -186,21 +191,22 @@ readonly REALM_ROYALE_APPID="813820"
 readonly STEAM_ASSET_BASE="https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${REALM_ROYALE_APPID}"
 
 # High-quality assets from Steam for shortcuts and the Steam library.
+# We use the official client icon URL to avoid the blurriness caused by scaling
+# the wide store logo into a square icon.
 readonly STEAM_LOGO_URL="${STEAM_ASSET_BASE}/logo.png?t=1739811771"
 readonly STEAM_GRID_URL="${STEAM_ASSET_BASE}/library_600x900_2x.jpg?t=1739811771"
 readonly STEAM_HERO_URL="${STEAM_ASSET_BASE}/library_hero_2x.jpg?t=1739811771"
 readonly STEAM_WIDE_URL="${STEAM_ASSET_BASE}/capsule_616x353.jpg?t=1739811771"
 readonly STEAM_HEADER_URL="${STEAM_ASSET_BASE}/header.jpg?t=1739811771"
-# community_icon is often best for the desktop shortcut as it's a square logo.
-readonly STEAM_COMMUNITY_ICON_URL="https://shared.fastly.steamstatic.com/community_assets/images/apps/${REALM_ROYALE_APPID}/068664cf452a9f2388cf1ccf1f239fc967ff9629.jpg"
+readonly STEAM_ICON_URL="https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/813820/c59e5deabf96d228085fe122772251dfa526b9e2.jpg"
 
-readonly STEAM_ASSETS_DIR="${HOME}/.cluckers/assets"
+readonly STEAM_ASSETS_DIR="${CLUCKERS_ROOT}/assets"
 readonly STEAM_LOGO_PATH="${STEAM_ASSETS_DIR}/logo.png"
 readonly STEAM_GRID_PATH="${STEAM_ASSETS_DIR}/grid.jpg"
 readonly STEAM_HERO_PATH="${STEAM_ASSETS_DIR}/hero.jpg"
 readonly STEAM_WIDE_PATH="${STEAM_ASSETS_DIR}/wide.jpg"
 readonly STEAM_HEADER_PATH="${STEAM_ASSETS_DIR}/header.jpg"
-readonly STEAM_ICON_PATH="${STEAM_ASSETS_DIR}/icon.jpg"
+readonly STEAM_ICON_PATH="${STEAM_ASSETS_DIR}/icon.png"
 
 # Directory where the two helper .exe / .dll binaries are stored after setup.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
@@ -2086,6 +2092,8 @@ DECK_LAYOUT_EOF
 #   $2  Name of the variable to receive a "true"/"false" is-Proton flag.
 #   $3  Name of the variable to receive the tool name (e.g. "Proton-GE-9-5").
 #   $4  Name of the variable to receive the wineserver binary path.
+#   $5  Name of the variable to receive the proton script path.
+#   $6  Name of the variable to receive a "true"/"false" is-SLR flag.
 #
 # Returns:
 #   Always 0. Output is written to the named variables via nameref.
@@ -2094,10 +2102,14 @@ find_wine() {
   local -n _out_is_proton=$2
   local -n _out_tool_name=$3
   local -n _out_server=$4
+  local -n _out_proton_script=$5
+  local -n _out_is_slr=$6
 
   _out_path=""
   _out_is_proton="false"
   _out_tool_name="proton"
+  _out_proton_script=""
+  _out_is_slr="false"
 
   local search_dirs=(
     "/usr/share/steam/compatibilitytools.d"
@@ -2123,27 +2135,17 @@ find_wine() {
 
   local newest_proton=""
   local newest_version="00000-00000"
+  local newest_script=""
+  local newest_is_slr="false"
 
   local d p base major minor ver
   for d in "${search_dirs[@]}"; do
     if [[ ! -d "${d}" ]]; then continue; fi
 
-    # 1. Check direct subdirectory (e.g., /opt/proton-cachyos/files/bin/wine64)
-    # or Lutris runners (e.g., .../lutris-ge-6.16-x86_64/bin/wine64)
-    if [[ -f "${d}/files/bin/wine64" ]]; then
-        if [[ -z "${newest_proton}" ]]; then
-            newest_proton="${d}/files/bin/wine64"
-        fi
-    elif [[ -f "${d}/bin/wine64" ]]; then
-        if [[ -z "${newest_proton}" ]]; then
-            newest_proton="${d}/bin/wine64"
-        fi
-    fi
-
-    # 2. Check for common Proton and custom Wine prefixes
+    # 1. Check for common Proton and custom Wine prefixes
     # Use a broad glob to find GE-Proton, proton-cachyos, lutris-ge, etc.
     for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* \
-              "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
+              "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-* "${d}"/Proton*; do
       local check_exe=""
       if [[ -f "${p}/files/bin/wine64" ]]; then
         check_exe="${p}/files/bin/wine64"
@@ -2153,10 +2155,18 @@ find_wine() {
 
       if [[ -n "${check_exe}" ]] && [[ -x "${check_exe}" ]]; then
         base=$(basename "${p}")
+
+        # Detect the companion 'proton' script. Official Valve Proton and many
+        # community builds include this script to handle container initialization
+        # (Steam Linux Runtime) and prefix setup.
+        local proton_script=""
+        local tool_root="${p}"
+        if [[ -f "${tool_root}/proton" ]]; then
+            proton_script="${tool_root}/proton"
+        fi
         
         # Test if the Wine binary can actually run a simple command.
-        # This filters out SLR builds that fail outside Steam Runtime.
-        # We use a temp prefix and skip Mono/Gecko to avoid "Taking ages".
+        # SLR builds fail outside Steam Runtime unless wrapped correctly.
         local env_adds bin_add lib_add loader_add
         env_adds=$(get_wine_env_additions "${check_exe}")
         bin_add="${env_adds%%|*}"; temp_adds="${env_adds#*|}"; 
@@ -2164,6 +2174,9 @@ find_wine() {
         
         local check_pfx
         check_pfx=$(mktemp -d /tmp/cluckers_pfx_check_XXXXXX)
+        local can_run="false"
+        local current_is_slr="false"
+
         if env WINEPREFIX="${check_pfx}" \
            PATH="${bin_add}:${PATH}" \
            LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
@@ -2171,7 +2184,17 @@ find_wine() {
            WINEDLLOVERRIDES="mscoree,mshtml=" \
            DISPLAY="" \
            "${check_exe}" cmd.exe /c exit >/dev/null 2>&1; then
-          rm -rf "${check_pfx}"
+          can_run="true"
+        elif [[ -n "${proton_script}" ]]; then
+          # If it fails to run standalone but has a 'proton' script, it is
+          # likely an SLR-managed Proton build. We trust it because the
+          # launcher script will use the 'proton' script to run it.
+          can_run="true"
+          current_is_slr="true"
+        fi
+        rm -rf "${check_pfx}"
+
+        if [[ "${can_run}" == "true" ]]; then
           # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
           if [[ "${base}" =~ GE-Proton([0-9]+)-([0-9]+) ]]; then
             major="${BASH_REMATCH[1]}"
@@ -2180,13 +2203,14 @@ find_wine() {
             if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
               newest_version="${ver}"
               newest_proton="${check_exe}"
+              newest_script="${proton_script}"
+              newest_is_slr="${current_is_slr}"
             fi
           elif [[ -z "${newest_proton}" ]]; then
             newest_proton="${check_exe}"
+            newest_script="${proton_script}"
+            newest_is_slr="${current_is_slr}"
           fi
-        else
-          rm -rf "${check_pfx}"
-          continue
         fi
       fi
     done
@@ -2195,9 +2219,10 @@ find_wine() {
   if [[ -n "${newest_proton}" ]] && [[ -x "${newest_proton}" ]]; then
     _out_path="${newest_proton}"
     _out_is_proton="true"
+    _out_proton_script="${newest_script}"
+    _out_is_slr="${newest_is_slr}"
+
     # Extract a meaningful tool name (e.g., GE-Proton9-20 or proton-cachyos)
-    # If path is .../ToolName/files/bin/wine64, name is ToolName.
-    # If path is .../ToolName/bin/wine64, name is ToolName.
     local tool_dir
     tool_dir=$(dirname "$(dirname "${newest_proton}")")
     if [[ "$(basename "${tool_dir}")" == "bin" ]]; then
@@ -2253,6 +2278,8 @@ find_wine() {
         rm -rf "${check_pfx}"
         _out_path="${path}"
         _out_tool_name="wine"
+        _out_proton_script=""
+        _out_is_slr="false"
 
         # Set the wineserver path associated with this Wine binary
         _out_server="$(dirname "${path}")/wineserver"
@@ -2301,6 +2328,8 @@ main() {
   local real_wine_path=""
   local real_wineserver="wineserver"
   local _proton_tool_name="proton"
+  local real_proton_script=""
+  local _is_slr="false"
 
   local arg
   for arg in "$@"; do
@@ -2406,7 +2435,14 @@ main() {
   # Detect Wine/Proton once upfront — result is used in Step 3 (prefix),
   # Step 4 (DXVK), and Step 8 (launcher). find_wine sets the variables
   # passed as arguments.
-  find_wine real_wine_path _is_proton _proton_tool_name real_wineserver || true
+  find_wine real_wine_path _is_proton _proton_tool_name real_wineserver real_proton_script _is_slr || true
+
+  # Migrate old 'prefix' directory to 'pfx' if it exists.
+  if [[ -d "${CLUCKERS_ROOT}/prefix" ]] && [[ ! -d "${WINEPREFIX}" ]]; then
+    info_msg "Migrating Wine prefix from 'prefix' to 'pfx'..."
+    mv "${CLUCKERS_ROOT}/prefix" "${WINEPREFIX}"
+    ok_msg "Prefix migrated."
+  fi
 
   # Maintenance Wine: used for winetricks and wineboot (prefix setup).
   # SLR Proton builds cannot run standalone and cause hangs in these steps,
@@ -12639,8 +12675,8 @@ XDLL_B64_EOF
        && curl -sfL -o "${STEAM_HERO_PATH}" "${STEAM_HERO_URL}" \
        && curl -sfL -o "${STEAM_WIDE_PATH}" "${STEAM_WIDE_URL}" \
        && curl -sfL -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" \
-       && curl -sfL -o "${STEAM_ICON_PATH}" "${STEAM_COMMUNITY_ICON_URL}"; then
-      # Prefer the square community icon for the desktop shortcut.
+       && curl -sfL -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}"; then
+      # Use the high-quality logo.png for the desktop icon.
       cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
       asset_downloaded="true"
       ok_msg "High-quality Steam assets downloaded successfully."
@@ -12762,6 +12798,7 @@ $(
   printf 'export WINELOADER="%s"\n' "${_loader_add}"
 )
 
+export CLUCKERS_ROOT="${CLUCKERS_ROOT}"
 export WINEPREFIX="${WINEPREFIX}"
 export WINEARCH="win64"
 
@@ -12814,9 +12851,10 @@ else
   printf 'export WINEDLLOVERRIDES="dxgi=n"\n'
 fi)
 
-# Wine binary resolved by find_wine() at setup time — baked in as a fixed path.
+# Wine binary and optional Proton script resolved by find_wine() at setup time.
 WINE="${real_wine_path}"
 WINESERVER="${real_wineserver}"
+PROTON_SCRIPT="${real_proton_script}"
 
 # Sync primitives: ntsync (modern) or fsync (standard GE-Proton).
 # These improve game performance and reduce stutter by optimizing how
@@ -12841,7 +12879,7 @@ GS_ARGS="${GAMESCOPE_ARGS}"
 SKIP_MOVIES="${skip_movies}"
 GATEWAY_URL="${GATEWAY_URL:-https://gateway-dev.project-crown.com}"
 HOST_X="${HOST_X:-157.90.131.105}"
-CREDS_FILE="${HOME}/.cluckers/credentials.enc"
+CREDS_FILE="${CLUCKERS_ROOT}/credentials.enc"
 
 # Skip intro movies if the user hasn't opted in to showing them.
 # Patches INI files to set bForceNoMovies.
@@ -13136,32 +13174,44 @@ trap _cleanup EXIT INT TERM HUP
 
 # ---- Launch ---------------------------------------------------------------
 
+# Prepare final command.
+_launch_cmd=()
+if [[ -n "${PROTON_SCRIPT:-}" && -x "${PROTON_SCRIPT}" ]]; then
+  # Steam's Proton script handles SLR (Steam Linux Runtime) containers
+  # and prefix initialization automatically.
+  # We set STEAM_COMPAT_DATA_PATH to the root Cluckers directory;
+  # Proton looks for the Wine prefix in a subdirectory named 'pfx'.
+  export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
+  _launch_cmd=("${PROTON_SCRIPT}" "run")
+else
+  _launch_cmd=("${WINE}")
+fi
+
 if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
-  # exec replaces this shell process with the game process.
+  # the game process starts.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
     DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
-      "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
+      "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
         "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
         "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    "${WINE}" "${TOOLS_DIR}/shm_launcher.exe" \
+    "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
       "${_game_args[@]}"
   fi
 else
-  # No bootstrap data — launch game directly.
   # No bootstrap data available — launch the game directly without shared memory.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
-    DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${WINE}" "${_game_exe}" "${_game_args[@]}" &
+    DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    "${WINE}" "${_game_exe}" "${_game_args[@]}"
+    "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}"
   fi
 fi
 
@@ -13317,20 +13367,13 @@ def compute_shortcut_id(exe: str, name: str) -> int:
 
     Steam uses CRC32 of the concatenated exe path and display name to identify
     non-Steam shortcuts. The high bit is always set.
-
-    Args:
-        exe:  Absolute path to the launcher script.
-        name: Display name of the shortcut.
-
-    Returns:
-        Unsigned 32-bit shortcut ID.
     """
     crc = binascii.crc32((exe + name).encode("utf-8")) & 0xFFFFFFFF
     return (crc | 0x80000000) & 0xFFFFFFFF
 
 
 unsigned_id    = compute_shortcut_id(LAUNCHER, APP_NAME)
-grid_appid     = str(unsigned_id)
+# For the shortcuts.vdf file, Steam expects a signed 32-bit integer.
 shortcut_appid = (
     unsigned_id - 4294967296 if unsigned_id > 2147483647 else unsigned_id
 )
@@ -13399,16 +13442,17 @@ try:
     }
 
     # For non-Steam games, Steam uses various IDs for filenames in grid/.
-    # We try all of them:
-    # 1. Standard 32-bit CRC (unsigned)
-    # 2. Signed 32-bit CRC (sometimes used)
-    # 3. 64-bit AppID (Modern Steam)
-    # 4. 32-bit CRC with high bit cleared (Legacy)
+    # 1. 32-bit CRC (unsigned)
+    # 2. 32-bit CRC (signed)
+    # 3. 64-bit AppID - (unsigned_32bit_crc << 32) | 0x02000000.
+    # 4. 32-bit CRC with top bit cleared.
     crc_unsigned = binascii.crc32((LAUNCHER + APP_NAME).encode("utf-8")) & 0xFFFFFFFF
     crc_signed   = (crc_unsigned | 0x80000000) & 0xFFFFFFFF
     long_id      = (crc_unsigned << 32) | 0x02000000
     legacy_id    = (crc_unsigned & 0x7FFFFFFF)
 
+    # We try ALL potential IDs to ensure Steam finds the artwork regardless of
+    # its internal version or ID calculation quirk.
     potential_ids = [str(crc_unsigned), str(crc_signed), str(long_id), str(legacy_id)]
 
     for src, suffixes in art_map.items():
@@ -13417,8 +13461,8 @@ try:
         ext = os.path.splitext(src)[1]
         for suffix in suffixes:
             for aid in potential_ids:
-                # Try source extension and common overrides (.jpg, .png)
-                for final_ext in [ext, ".jpg", ".png"]:
+                # Try all common extensions because Steam is picky.
+                for final_ext in [ext, ".jpg", ".png", ".jpeg"]:
                     dest = os.path.join(grid_dir, f"{aid}{suffix}{final_ext}")
                     try:
                         shutil.copy2(src, dest)
