@@ -894,13 +894,19 @@ install_winetricks_multi() {
     (( completed > total )) && completed=${total}
     (( completed < 0 )) && completed=0
     
-    local percent=$(( completed * 100 / total ))
-    local bar_len=30
-    local filled=$(( completed * bar_len / total ))
-    local empty=$(( bar_len - filled ))
+    # Guard against division by zero if total is somehow 0.
+    local percent=0
+    local filled=0
+    local empty=30
+    if [[ ${total} -gt 0 ]]; then
+      percent=$(( completed * 100 / total ))
+      filled=$(( completed * 30 / total ))
+      empty=$(( 30 - filled ))
+    fi
+
     local bar_str empty_str
-    bar_str=$(printf "%${filled}s" | tr ' ' '#')
-    empty_str=$(printf "%${empty}s" | tr ' ' '-')
+    bar_str=$(printf "%${filled}s" "" | tr ' ' '#')
+    empty_str=$(printf "%${empty}s" "" | tr ' ' '-')
     
     # Try to find what's currently executing from the output.
     # Use a subshell with set +e to safely extract the verb without triggering pipefail.
@@ -12984,6 +12990,10 @@ fi)
 GAME_DIR="${GAME_DIR}"
 GAME_EXE_REL="${GAME_EXE_REL}"
 TOOLS_DIR="${TOOLS_DIR}"
+
+# Ensure we run from the game directory for consistency.
+cd "\${GAME_DIR}"
+
 USE_GAMESCOPE="${use_gamescope}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 SKIP_MOVIES="${skip_movies}"
@@ -13515,7 +13525,7 @@ try:
         "appid":            shortcut_appid,
         "AppName":          APP_NAME,
         "Exe":              LAUNCHER,
-        "StartDir":         os.path.dirname(LAUNCHER),
+        "StartDir":         os.path.dirname(os.environ["STEAM_GRID_PATH_ENV"]), # GAME_DIR is parent of assets
         "icon":             os.environ.get("STEAM_ICON_PATH_ENV", ICON_PATH),
         "ShortcutPath":     "",
         "LaunchOptions":    "",
@@ -13544,11 +13554,13 @@ try:
     #   (none) - Horizontal grid (landscape)
     #   _hero  - Background hero image
     #   _logo  - Clear logo image
+    #   _header - Small header image
     art_map = {
         STEAM_GRID: ["p"],      # Vertical grid
         STEAM_WIDE: [""],       # Horizontal grid (no suffix)
         STEAM_HERO: ["_hero"],  # Hero background
         STEAM_LOGO: ["_logo"],  # Clear logo
+        STEAM_HEADER: ["_header"], # Header image
     }
 
     # For non-Steam games, Steam uses various IDs for filenames in grid/.
