@@ -1623,8 +1623,7 @@ find_wine() {
           ver=$(printf "%05d-%05d" "${major}" "${minor}")
           if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
             # Sanity check: Can this Wine actually run a basic command?
-            # 10s timeout to prevent hangs.
-            if timeout 10s "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+            if "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
               newest_version="${ver}"
               newest_proton="${p}/files/bin/wine64"
             fi
@@ -1632,14 +1631,14 @@ find_wine() {
         elif [[ -z "${newest_proton}" ]]; then
           # Fallback for other Protons without standard GE versioning
           # Sanity check: Can this Wine actually run a basic command?
-          if timeout 10s "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+          if "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
             newest_proton="${p}/files/bin/wine64"
           fi
         fi
       elif [[ -f "${p}/bin/wine64" ]]; then
         # Handle versions that don't use 'files' subfolder (e.g. some Lutris/Bottles runners)
         if [[ -z "${newest_proton}" ]]; then
-          if timeout 10s "${p}/bin/wine64" wineboot --version >/dev/null 2>&1; then
+          if "${p}/bin/wine64" wineboot --version >/dev/null 2>&1; then
             newest_proton="${p}/bin/wine64"
           fi
         fi
@@ -1804,7 +1803,7 @@ main() {
   local maint_wine="wine"
   local maint_server="wineserver"
 
-  if [[ -n "${real_wine_path}" ]] && timeout 10s "${real_wine_path}" wineboot --version >/dev/null 2>&1; then
+  if [[ -n "${real_wine_path}" ]] && "${real_wine_path}" wineboot --version >/dev/null 2>&1; then
     # The detected Wine is standalone-functional (e.g. GE-Proton or system Wine).
     maint_wine="${real_wine_path}"
     maint_server="${real_wineserver}"
@@ -12030,7 +12029,7 @@ def _post(endpoint, payload):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
 
 def _flex_bool(val):
