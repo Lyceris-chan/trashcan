@@ -850,7 +850,7 @@ install_winetricks_multi() {
   # winetricks can find Wine's internal DLLs (like kernel32.dll) and binaries.
   #
   # shellcheck disable=SC2086
-  local env_adds bin_add lib_add loader_add
+  local env_adds bin_add lib_add loader_add temp
   env_adds=$(get_wine_env_additions "${maint_wine}")
   bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
   lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
@@ -862,6 +862,7 @@ install_winetricks_multi() {
   # Snapshot the current log so we can count NEW installations.
   local log_before
   log_before=$(mktemp /tmp/wt_log_before.XXXXXX)
+  mkdir -p "${WINEPREFIX}"
   touch "${WINEPREFIX}/winetricks.log"
   cp "${WINEPREFIX}/winetricks.log" "${log_before}"
   local lines_before
