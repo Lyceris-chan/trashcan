@@ -335,21 +335,37 @@ get_wine_lib_path() {
   bin_dir="$(dirname "${wine_path}")"
   root_dir="$(dirname "${bin_dir}")"
   
-  # Add the bin directory itself to PATH (useful for sub-processes)
   local libs=""
+  local ld
+  # Use the absolute path of root_dir
+  if [[ -d "${root_dir}" ]]; then
+    root_dir=$(readlink -f "${root_dir}")
+  fi
+
+  # Search for standard and architecture-specific lib folders in the root.
+  # Modern Wine/Proton often nests unix/windows build files in subfolders.
+  local lib_dirs=(
+    "lib64" "lib" 
+    "lib64/wine" "lib/wine"
+    "lib64/wine/x86_64-unix" "lib/wine/i386-unix"
+    "lib/x86_64-linux-gnu" "lib/i386-linux-gnu"
+  )
+  for ld in "${lib_dirs[@]}"; do
+    if [[ -d "${root_dir}/${ld}" ]]; then
+      libs="${libs}${libs:+:}${root_dir}/${ld}"
+    fi
+  done
   
-  if [[ "$(basename "${bin_dir}")" == "bin" ]]; then
-    # Standard layout: bin/ next to lib64/ and lib/
-    libs="${root_dir}/lib64:${root_dir}/lib"
-  elif [[ "$(basename "${bin_dir}")" == "files/bin" ]]; then
-    # Proton layout: files/bin/ next to files/lib64/ and files/lib/
-    # root_dir is 'files'
-    libs="${root_dir}/lib64:${root_dir}/lib"
-    # Also add the parent's lib if it exists (some custom builds use both)
-    local parent_root
-    parent_root="$(dirname "${root_dir}")"
-    [[ -d "${parent_root}/lib64" ]] && libs="${libs}:${parent_root}/lib64"
-    [[ -d "${parent_root}/lib" ]] && libs="${libs}:${parent_root}/lib"
+  # If it's a Proton 'files' layout, also check the parent directory
+  # (e.g. .../Proton-Name/lib instead of .../Proton-Name/files/lib).
+  if [[ "${bin_dir}" == */files/bin ]]; then
+     local parent_root
+     parent_root=$(readlink -f "$(dirname "${root_dir}")")
+     for ld in "${lib_dirs[@]}"; do
+       if [[ -d "${parent_root}/${ld}" ]]; then
+         libs="${libs}${libs:+:}${parent_root}/${ld}"
+       fi
+     done
   fi
   printf "%s" "${libs}"
 }
@@ -13315,12 +13331,15 @@ try:
 
     # Mapping of library art types to their respective files and suffixes.
     # Steam looks for files named <appid><suffix> in the grid/ directory.
+    #   p      - Vertical grid (poster)
+    #   (none) - Horizontal grid (landscape)
+    #   _hero  - Background hero image
+    #   _logo  - Clear logo image
     art_map = {
-        STEAM_GRID: ["", "p"],      # Vertical grid and portrait
-        STEAM_HERO: ["_hero"],      # Hero background
-        STEAM_LOGO: ["_logo"],      # Clear logo
-        STEAM_WIDE: ["_grid"],      # Horizontal wide grid
-        STEAM_HEADER: ["_header"],  # Header image
+        STEAM_GRID: ["p"],      # Vertical grid
+        STEAM_WIDE: [""],       # Horizontal grid (no suffix)
+        STEAM_HERO: ["_hero"],  # Hero background
+        STEAM_LOGO: ["_logo"],  # Clear logo
     }
 
     for src, suffixes in art_map.items():
