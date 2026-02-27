@@ -741,24 +741,25 @@ install_winetricks_multi() {
   #   0 if the package's key DLL is present; 1 if absent or verb is unknown.
   _verb_dll_present() {
     local v="$1"
+    local search_path="${WINEPREFIX}/drive_c/windows"
     case "${v}" in
       vcrun2010)
-        [[ -f "${sys64}/msvcr100.dll" || -f "${syswow}/msvcr100.dll" ]]
+        find "${search_path}" -maxdepth 2 -iname "msvcr100.dll" 2>/dev/null | grep -q .
         ;;
       vcrun2012)
-        [[ -f "${sys64}/msvcr110.dll" || -f "${syswow}/msvcr110.dll" ]]
+        find "${search_path}" -maxdepth 2 -iname "msvcr110.dll" 2>/dev/null | grep -q .
         ;;
       vcrun2019)
         # vcruntime140.dll is the canonical installed_file1 for vcrun2019.
-        [[ -f "${sys64}/vcruntime140.dll" \
-           || -f "${syswow}/vcruntime140.dll" ]]
+        find "${search_path}" -maxdepth 2 -iname "vcruntime140.dll" 2>/dev/null | grep -q .
         ;;
       dxvk)
         # Both d3d11.dll and dxgi.dll must be present.
-        [[ -f "${sys64}/d3d11.dll" && -f "${sys64}/dxgi.dll" ]]
+        find "${search_path}/system32" -maxdepth 1 -iname "d3d11.dll" 2>/dev/null | grep -q . && \
+        find "${search_path}/system32" -maxdepth 1 -iname "dxgi.dll" 2>/dev/null | grep -q .
         ;;
       d3dx11_43)
-        [[ -f "${sys64}/d3dx11_43.dll" || -f "${syswow}/d3dx11_43.dll" ]]
+        find "${search_path}" -maxdepth 2 -iname "d3dx11_43.dll" 2>/dev/null | grep -q .
         ;;
       *)
         return 1
@@ -773,7 +774,7 @@ install_winetricks_multi() {
     # First, check the winetricks log (most reliable, same logic winetricks uses).
     # If not found there, check whether the DLL is already on disk — this catches
     # packages that Proton installed before this script was ever run.
-    if grep -qw "${pkg}" "${wt_log}" 2>/dev/null; then
+    if grep -qE "^${pkg}$" "${wt_log}" 2>/dev/null; then
       ok_msg "${pkg} already installed (winetricks.log) — skipping."
     elif _verb_dll_present "${pkg}"; then
       ok_msg "${pkg} already installed (DLL present in prefix) — skipping."
@@ -824,12 +825,18 @@ install_winetricks_multi() {
   #
   # LD_LIBRARY_PATH and PATH are set using get_wine_env_additions() so
   # winetricks can find Wine's internal DLLs (like kernel32.dll) and binaries.
+  # These are skipped if using the Proton wrapper (is_proton_maint), as Proton
+  # handles its own environment variables.
   #
   # shellcheck disable=SC2086
   local env_adds bin_add lib_add loader_add temp
-  env_adds=$(get_wine_env_additions "${maint_wine}")
-  bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
-  lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
+  if [[ "${is_proton_maint:-false}" == "false" ]]; then
+    env_adds=$(get_wine_env_additions "${maint_wine}")
+    bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
+    lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
+  else
+    bin_add=$(dirname "${maint_wine}"); lib_add=""; loader_add="${maint_wine}"
+  fi
 
   # Start winetricks in the background so we can show a progress indicator.
   local wt_out
@@ -847,7 +854,7 @@ install_winetricks_multi() {
   (
     env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
        PATH="${bin_add}:${PATH}" \
-       LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+       ${lib_add:+LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"} \
        WINELOADER="${loader_add}" \
        DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG="-all" \
        "${WINETRICKS_BIN:-winetricks}" ${wt_flags} "${to_install[@]}" > "${wt_out}" 2>&1
@@ -2560,15 +2567,32 @@ main() {
   # so we prefer a standalone-functional Wine binary for maintenance tasks.
   local maint_wine="wine"
   local maint_server="wineserver"
+  local is_proton_maint="false"
 
-  # Use the detected Wine if it's functional standalone (not SLR).
-  if [[ -n "${real_wine_path}" ]] && [[ "${_is_slr}" == "false" ]]; then
+  # Use the detected Proton script if available (works for SLR and non-SLR).
+  if [[ -n "${real_proton_script}" ]] && [[ -x "${real_proton_script}" ]]; then
+    # winetricks requires a single binary path for WINE. We create a small
+    # wrapper that calls 'proton run' so winetricks works with any Proton build.
+    local wrapper_dir="${CLUCKERS_ROOT}/tools"
+    mkdir -p "${wrapper_dir}"
+    maint_wine="${wrapper_dir}/wine_wrapper"
+    cat << EOF > "${maint_wine}"
+#!/usr/bin/env bash
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="\${STEAM_COMPAT_CLIENT_INSTALL_PATH:-\${HOME}/.steam/steam}"
+export STEAM_COMPAT_DATA_PATH="\${STEAM_COMPAT_DATA_PATH:-\${WINEPREFIX}}"
+"${real_proton_script}" run "\$@"
+EOF
+    chmod +x "${maint_wine}"
+    maint_server="${real_wineserver}"
+    is_proton_maint="true"
+    info_msg "Using Proton wrapper for maintenance: ${real_proton_script}"
+  elif [[ -n "${real_wine_path}" ]] && [[ "${_is_slr}" == "false" ]]; then
     # The detected Wine is functional (e.g. GE-Proton or system Wine).
     maint_wine="${real_wine_path}"
     maint_server="${real_wineserver}"
     info_msg "Using Wine binary: ${real_wine_path}"
   else
-    # The detected Wine is likely SLR Proton or missing. Fallback to system Wine.
+    # Fallback to system Wine.
     if command_exists wine; then
       maint_wine=$(command -v wine)
       maint_server=$(command -v wineserver || echo "wineserver")
