@@ -13070,13 +13070,14 @@ EOF
   # Check if Steam is running. Steam must be closed to write to shortcuts.vdf reliably.
   if pgrep -x "steam" > /dev/null; then
     warn_msg "Steam is currently running."
-    warn_msg "To ensure the shortcut is added correctly, please close Steam and re-run this script."
-    warn_msg "Otherwise, Steam may overwrite the changes upon exit."
+    warn_msg "Exiting Steam is required for the shortcut to be saved correctly."
+    warn_msg "You can close Steam via: Steam menu > Exit (or click the tray icon and Exit)."
+    warn_msg "Otherwise, Steam may overwrite your shortcuts file when it eventually closes."
     if [[ "${auto_mode}" == "false" ]]; then
-      printf "  Continue anyway? [y/N] "
-      local answer=""
-      read -r answer
-      if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
+      printf "\n  [PROMPT] Close Steam, then press ENTER to continue (or type 'skip'): "
+      local choice=""
+      read -r choice
+      if [[ "${choice,,}" == "skip" ]]; then
         info_msg "Skipping Steam integration (user requested)."
         skip_steam="true"
       fi
