@@ -121,55 +121,85 @@ GAME_VERSION="${GAME_VERSION:-auto}"
 #
 # Steam Deck users: these args are NOT used when --steam-deck / -d is passed
 # because SteamOS runs its own Gamescope session automatically.
-GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 --adaptive-sync --borderless"
+GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 \
+  --adaptive-sync --borderless"
 
 # ==============================================================================
 #  Constants  (readonly — cannot be changed at runtime)
 # ==============================================================================
 
-# Wine prefix: an isolated fake-Windows folder just for this game.
-# Nothing else on your system is affected. Uninstalling means deleting this.
+# Wine prefix: a self-contained fake Windows environment created just for this
+# game. Think of it as a tiny, isolated Windows installation that lives inside
+# your home folder. It does not affect the rest of your Linux system at all.
+# To uninstall the game completely, delete this directory (the --uninstall flag
+# does this for you).
 readonly WINEPREFIX="${HOME}/.cluckers/prefix"
 
-# Python libraries installation target
+# Directory where extra Python packages used by this script are installed.
+# Packages go here instead of system-wide to avoid needing sudo or affecting
+# other Python programs on your system.
 readonly CLUCKERS_PYLIBS="${HOME}/.cluckers/pylibs"
 export PYTHONPATH="${CLUCKERS_PYLIBS}:${PYTHONPATH:-}"
 
-# Launcher script written to ~/.local/bin during install.
+# The launcher script written to ~/.local/bin/ during setup. This is the small
+# shell script that sets up Wine and starts the game. You can run it directly
+# from a terminal or via the .desktop shortcut in your application menu.
 readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 
-# .desktop shortcut (shows the game in your application menu).
+# The .desktop file makes the game appear as an icon in your application menu
+# (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
 readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"
 
 readonly APP_NAME="Cluckers Central"
 
-# Update-server endpoint — returns version.json with the latest build metadata.
+# Update-server endpoint that returns version.json with the latest build info.
+# The JSON schema is defined in the companion Go server source:
+# https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 readonly UPDATER_URL="https://updater.realmhub.io/builds/version.json"
 
-# Game data directory — where game files are downloaded and extracted.
+# Directory where game files are downloaded and extracted.
 readonly GAME_DIR="${HOME}/.cluckers/game"
 
-# Relative path to the game executable inside GAME_DIR.
+# Path to the game executable, relative to GAME_DIR.
+# "ShippingPC-RealmGameNoEditor.exe" is the standard name for a shipped (retail)
+# Unreal Engine 3 game binary. "NoEditor" simply means the UE3 level-editor
+# tools are stripped out — this is normal for all shipped UE3 titles.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
 readonly GAME_EXE_REL="Realm-Royale/Binaries/Win64/ShippingPC-RealmGameNoEditor.exe"
 
-# Steam AppID for Realm Royale (the underlying game engine).
+# Official Steam store AppID for Realm Royale Reforged. Used when creating and
+# removing Steam non-Steam-game shortcuts so the correct shortcut is found.
+# Verify: https://store.steampowered.com/app/813820/Realm_Royale_Reforged/
 readonly REALM_ROYALE_APPID="813820"
 
-# Tools directory: where shm_launcher.exe and xinput1_3.dll are installed.
+# Directory where the two helper .exe / .dll binaries are stored after setup.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
 
-# SHA-256 checksums of the compiled helper binaries embedded in this script.
-# These match the values produced by the compile commands in the header.
+# SHA-256 checksums for the two Windows helper binaries embedded in this script.
+# SHA-256 is a fingerprint algorithm: if even one byte of a file changes, the
+# fingerprint changes completely. We compare the fingerprint after decoding the
+# embedded binary to guarantee you are running exactly the code we compiled —
+# not a modified or corrupted version. See the REPRODUCIBLE BUILDS section
+# inside Step 6 for full instructions on compiling and verifying yourself.
 readonly SHM_LAUNCHER_SHA256="e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd"
 readonly XINPUT_DLL_SHA256="a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24"
 
-# SHA-256 of the embedded Steam Deck controller layout (controller_neptune_config.vdf).
-# This is verified after extraction to ensure the embedded template is intact.
+# SHA-256 fingerprint of the embedded Steam Deck controller layout template.
+# Verified after extraction to confirm the embedded data was not corrupted.
 readonly CONTROLLER_LAYOUT_SHA256="779194a12bf6a353e8931b17298d930f60e83126aa1a357dc6597d81dfd61709"
 
 export WINEPREFIX
+
+# WINEARCH tells Wine what type of fake Windows environment to create.
+# "win64" means a 64-bit Windows prefix. This is required because Realm Royale
+# only ships a 64-bit game executable — there is no 32-bit version of the game.
+# A "win32" prefix would be unable to run it at all.
+# A win64 prefix also keeps 32-bit helper DLLs in a separate folder (syswow64)
+# alongside the 64-bit ones in system32, which is needed by the Visual C++
+# runtime packages that ship DLLs for both architectures.
+# Source: https://wiki.winehq.org/Wine_User%27s_Guide#WINEARCH
 export WINEARCH="win64"
 
 # ANSI colour codes.
@@ -185,53 +215,79 @@ readonly NC='\033[0m'
 #  Output helpers
 # ==============================================================================
 
-# Prints a bold section header.
+# Prints a bold section-header banner to stdout.
 #
 # Arguments:
-#   $1 - Step description.
+#   $1 - Step description string to display.
+#
+# Returns:
+#   Always 0.
 step_msg() {
   printf "\n%b\n%b[STEP]%b %b%b%s%b\n" \
     "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" \
     "${BLUE}" "${NC}" "${BOLD}" "${GREEN}" "$1" "${NC}"
 }
 
-# Prints an informational message.
+# Prints an informational message to stdout.
 #
 # Arguments:
-#   $1 - Message.
+#   $1 - Message string.
+#
+# Returns:
+#   Always 0.
 info_msg() { printf "  %b[INFO]%b  %s\n" "${CYAN}" "${NC}" "$1"; }
 
-# Prints a success message.
+# Prints a success message to stdout.
 #
 # Arguments:
-#   $1 - Message.
+#   $1 - Message string.
+#
+# Returns:
+#   Always 0.
 ok_msg() { printf "  %b[ OK ]%b  %s\n" "${GREEN}" "${NC}" "$1"; }
 
-# Prints a non-fatal warning.
+# Prints a non-fatal warning to stdout.
 #
 # Arguments:
-#   $1 - Message.
+#   $1 - Message string.
+#
+# Returns:
+#   Always 0.
 warn_msg() { printf "  %b[WARN]%b  %s\n" "${YELLOW}" "${NC}" "$1"; }
 
-# Prints an error to stderr and exits.
+# Prints an error message to stderr and exits with status 1.
 #
 # Arguments:
-#   $1 - Error message.
+#   $1 - Error message string.
+#
+# Returns:
+#   Does not return; exits the process.
 error_exit() {
   printf "\n%b[ERROR]%b %s\n\n" "${RED}" "${NC}" "$1" >&2
   exit 1
 }
 
-# Prints the script usage documentation.
+# Prints the script usage documentation extracted from the header comment block.
+#
+# The header comment spans lines 2-100 of this file. Leading "# " prefixes are
+# stripped so the output is plain text, suitable for display in a terminal.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   Always 0.
 print_help() {
-  # Extract the header comment block (lines 2-100) and remove leading '# '
   sed -n '2,100p' "$0" | sed 's/^# \?//'
 }
 
-# Returns 0 if the named command exists on PATH.
+# Returns 0 if the named command exists on PATH, 1 otherwise.
 #
 # Arguments:
-#   $1 - Command name.
+#   $1 - Command name to look up.
+#
+# Returns:
+#   0 if found, 1 if not found.
 command_exists() { command -v "$1" > /dev/null 2>&1; }
 
 # ==============================================================================
@@ -296,11 +352,19 @@ DATBLAKE3EOF
 }
 
 # Installs missing system packages using the distro's package manager.
-# Checks for: wine winetricks curl wget python3 unzip sha256sum cabextract.
-# Installs only what is absent. Supports apt, pacman, dnf, zypper.
+#
+# Checks for the tools this script depends on and installs only those that are
+# absent. Supported package managers: apt, pacman, dnf, zypper.
+# On apt systems, also ensures wine32:i386, wine64, libwine:i386, and
+# fonts-wine are installed, since Wine's 64-bit prefix still needs the 32-bit
+# runtime libraries for syswow64 (mixed 32/64-bit DLL support).
 #
 # Arguments:
-#   $1 - Package manager: "apt" | "pacman" | "dnf" | "zypper".
+#   $1  Package manager name: "apt" | "pacman" | "dnf" | "zypper".
+#   $@  Additional package names to check/install beyond the default set.
+#
+# Returns:
+#   0 on success; non-zero if the package manager command fails.
 install_sys_deps() {
   local -r pkg_mgr="$1"
   shift
@@ -343,7 +407,8 @@ install_sys_deps() {
     if ! dpkg-query -W -f='${Status}' wine64 2>/dev/null | grep -q "install ok installed"; then
       to_install+=("wine64")
     fi
-    if ! dpkg-query -W -f='${Status}' libwine:i386 2>/dev/null | grep -q "install ok installed"; then
+    if ! dpkg-query -W -f='${Status}' libwine:i386 2>/dev/null \
+         | grep -q "install ok installed"; then
       to_install+=("libwine:i386")
     fi
     if ! dpkg-query -W -f='${Status}' fonts-wine 2>/dev/null | grep -q "install ok installed"; then
@@ -376,20 +441,26 @@ install_sys_deps() {
   esac
 }
 
-# Ensures winetricks is up-to-date by fetching the latest version from the
-# official GitHub release if the installed copy is older than 30 days or if
-# the installed version is too old to know about required verbs (vcrun2022,
-# dxvk ≥ 2.x, etc.). An outdated winetricks can silently download wrong DLLs
-# from stale URLs, which causes the game to fail to start without a clear error.
+# Ensures winetricks is recent enough to install the packages the game needs.
 #
-# The official source is:
+# winetricks is a helper script that installs Windows libraries (DLLs) into a
+# Wine prefix. Like any software, it can become outdated. An old copy may try
+# to download a library from a URL that no longer exists, or install a version
+# too old to work. This function checks the installed version and updates it
+# from the official GitHub source if it is below the minimum required version.
+#
+# If the update download fails (no internet, GitHub unreachable), the existing
+# copy is kept and a warning is printed. The script continues — it never stops
+# just because it could not update winetricks.
+#
+# Official winetricks source:
 #   https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks
 #
-# If the download fails (offline), the installed version is kept as-is and a
-# warning is printed. This function never hard-fails — it degrades gracefully.
-#
 # Arguments:
-#   none
+#   None.
+#
+# Returns:
+#   Always 0 (degrades gracefully on failure).
 ensure_winetricks_fresh() {
   local wt_path
   wt_path=$(command -v winetricks 2>/dev/null || true)
@@ -402,7 +473,7 @@ ensure_winetricks_fresh() {
   local wt_ver
   wt_ver=$(winetricks --version 2>/dev/null | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
 
-  # Minimum required version: 20240105 (first release with vcrun2022 + dxvk 2.3).
+  # Minimum required version: 20240105 (first release with vcrun2019 + dxvk 2.3).
   local min_ver="20240105"
 
   if [[ "${wt_ver}" -ge "${min_ver}" ]] 2>/dev/null; then
@@ -425,13 +496,14 @@ ensure_winetricks_fresh() {
     first_line=$(head -c 64 "${wt_tmp}" 2>/dev/null || true)
     if [[ "${first_line}" != "#!"* ]]; then
       rm -f "${wt_tmp}"
-      warn_msg "Downloaded winetricks does not appear to be a valid shell script — keeping installed copy."
+      warn_msg "Downloaded winetricks is not a valid shell script — keeping installed copy."
       return 0
     fi
 
     chmod +x "${wt_tmp}"
     local new_ver
-    new_ver=$(bash "${wt_tmp}" --version 2>/dev/null | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
+    new_ver=$(bash "${wt_tmp}" --version 2>/dev/null \
+      | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
     if [[ "${new_ver}" -ge "${wt_ver}" ]] 2>/dev/null; then
       # If winetricks lives somewhere user-writable, update it in place.
       # Otherwise, install to ~/.local/bin which is on our PATH.
@@ -462,10 +534,16 @@ ensure_winetricks_fresh() {
   fi
 }
 
-# Installs icoutils (wrestool + icotool) for icon extraction.
+# Installs icoutils (wrestool + icotool) for icon extraction from .exe files.
+#
+# icoutils is needed to extract the game icon from the .exe and convert it to
+# PNG for the .desktop shortcut. Without it the shortcut has no icon.
 #
 # Arguments:
-#   $1 - Package manager: "apt" | "pacman" | "dnf" | "zypper".
+#   $1  Package manager name: "apt" | "pacman" | "dnf" | "zypper".
+#
+# Returns:
+#   0 on success; non-zero if the package manager command fails.
 install_icoutils() {
   local -r pkg_mgr="$1"
   case "${pkg_mgr}" in
@@ -476,22 +554,42 @@ install_icoutils() {
   esac
 }
 
-# Installs multiple winetricks packages in one go if they are not already installed.
-# Mirrors the prefix repair logic in:
-# https://github.com/0xc0re/cluckers/blob/master/internal/wine/proton.go
+# Installs one or more winetricks packages, skipping any already present.
 #
-# Installed-verb detection uses winetricks' own state directory:
-#   ${WINEPREFIX}/winetricks/<verb>/
-# This is the authoritative source — it is created by winetricks itself after
-# each successful install, so it is always accurate even across script re-runs
-# or if packages were installed outside this script.
+# winetricks "verbs" are short package names (like "vcrun2019" or "dxvk") that
+# winetricks translates into real Windows library installers. This function
+# checks whether each verb is already installed before running winetricks, so
+# re-running the setup script does not waste time re-downloading packages that
+# are already present in your Wine prefix.
+#
+# Two checks are used before deciding to install a package:
+#
+#   1. winetricks.log — winetricks records every successfully installed verb in
+#      "${WINEPREFIX}/winetricks.log", one name per line. We search this file
+#      with "grep -w" (whole-word match) using the same logic that winetricks
+#      itself uses in its winetricks_is_installed() function.
+#      Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+#              winetricks_is_installed() ~line 4277
+#              winetricks_stats_log_command() ~line 19630
+#
+#   2. DLL file presence — each package installs a specific Windows DLL file
+#      into the Wine prefix. If that DLL already exists, the package is already
+#      installed — even if winetricks did not install it (Proton, for example,
+#      pre-installs many of these). The DLL names come from each verb's
+#      "installed_file1" entry in the winetricks source code.
+#      Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+#              w_metadata blocks for vcrun2010, vcrun2012, vcrun2019, dxvk,
+#              d3dx11_43; W_SYSTEM64_DLLS assignment ~line 4673
 #
 # Arguments:
-#   $1 - Human-readable description for progress output.
-#   $2 - Maintenance Wine path.
-#   $3 - Maintenance Wineserver path.
-#   $4 - is_auto mode flag.
-#   $@ - winetricks package identifiers (e.g. "vcrun2010 vcrun2012").
+#   $1  Human-readable label shown in progress messages (e.g. "C++ runtimes").
+#   $2  Path to the Wine binary to use for this operation.
+#   $3  Path to the wineserver binary paired with $2.
+#   $4  "true" if running in non-interactive (auto) mode, "false" otherwise.
+#   $@  winetricks verb names to install (e.g. "vcrun2010" "vcrun2019").
+#
+# Returns:
+#   0 on success; continues with a warning if individual verbs fail.
 install_winetricks_multi() {
   local -r desc="$1"; shift
   local -r maint_wine="$1"; shift
@@ -500,12 +598,80 @@ install_winetricks_multi() {
   local -a to_install=()
   local pkg
 
+  # Inside your Wine prefix, Windows DLL files are stored in two folders that
+  # mirror the layout of a real 64-bit Windows installation:
+  #
+  #   drive_c/windows/system32   — 64-bit DLLs (called W_SYSTEM64_DLLS in winetricks)
+  #   drive_c/windows/syswow64   — 32-bit DLLs (called W_SYSTEM32_DLLS in winetricks)
+  #
+  # Even though "system32" sounds like it should hold 32-bit files, on 64-bit
+  # Windows (and Wine win64 prefixes) it actually holds the 64-bit libraries.
+  # This is a historical naming quirk that Microsoft kept for compatibility.
+  # The Visual C++ runtime packages install DLLs into both folders, while DXVK
+  # only installs 64-bit DLLs into system32.
+  local sys64="${WINEPREFIX}/drive_c/windows/system32"
+  local syswow="${WINEPREFIX}/drive_c/windows/syswow64"
+
+  # Checks whether the key DLL for a given winetricks verb already exists in
+  # the Wine prefix. Returns 0 (success/true) if found, 1 (failure/false) if
+  # not found or if the verb is not recognised.
+  #
+  # This is used as a fast pre-check so we skip re-installing packages that
+  # Proton already put into the prefix before winetricks was ever run (Proton
+  # bundles many of the same DLLs that winetricks would install separately).
+  #
+  # DLL names are taken from the installed_file1 field in each verb's w_metadata
+  # block in the winetricks source:
+  # https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+  #
+  # Arguments:
+  #   $1  winetricks verb name (e.g. "vcrun2010", "dxvk").
+  #
+  # Returns:
+  #   0 if the package's key DLL is present; 1 if absent or verb is unknown.
+  _verb_dll_present() {
+    local v="$1"
+    case "${v}" in
+      vcrun2010)
+        [[ -f "${sys64}/mfc100.dll" || -f "${syswow}/mfc100.dll" ]]
+        ;;
+      vcrun2012)
+        [[ -f "${sys64}/mfc110.dll" || -f "${syswow}/mfc110.dll" ]]
+        ;;
+      vcrun2019)
+        # vcruntime140.dll is the canonical installed_file1 for vcrun2019.
+        # Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+        #         w_metadata vcrun2019 installed_file1=vcruntime140.dll
+        [[ -f "${sys64}/vcruntime140.dll" \
+           || -f "${syswow}/vcruntime140.dll" ]]
+        ;;
+      dxvk)
+        # dxvk installs only 64-bit DLLs into system32 on a win64 prefix.
+        # Both d3d11.dll and dxgi.dll must be present — dxgi alone can come
+        # from Wine's built-in stub without a real DXVK install.
+        [[ -f "${sys64}/d3d11.dll" && -f "${sys64}/dxgi.dll" ]]
+        ;;
+      d3dx11_43)
+        [[ -f "${sys64}/d3dx11_43.dll" || -f "${syswow}/d3dx11_43.dll" ]]
+        ;;
+      *)
+        # Unknown verb — no DLL heuristic available; defer to winetricks.log.
+        return 1
+        ;;
+    esac
+  }
+
+  # winetricks writes one successfully installed verb per line to this log file.
+  # It is the most reliable source of truth for what winetricks has installed.
+  local wt_log="${WINEPREFIX}/winetricks.log"
   for pkg in "$@"; do
-    # Check winetricks' own state directory — created by winetricks after a
-    # successful install. This is more reliable than a custom log file because
-    # it reflects the true prefix state regardless of how the verb was installed.
-    if [[ -d "${WINEPREFIX}/winetricks/${pkg}" ]]; then
-      ok_msg "${pkg} already installed — skipping."
+    # First, check the winetricks log (most reliable, same logic winetricks uses).
+    # If not found there, check whether the DLL is already on disk — this catches
+    # packages that Proton installed before this script was ever run.
+    if grep -qw "${pkg}" "${wt_log}" 2>/dev/null; then
+      ok_msg "${pkg} already installed (winetricks.log) — skipping."
+    elif _verb_dll_present "${pkg}"; then
+      ok_msg "${pkg} already installed (DLL present in prefix) — skipping."
     else
       to_install+=("${pkg}")
     fi
@@ -525,18 +691,43 @@ install_winetricks_multi() {
     wt_flags="-q"
   fi
 
-  # Run winetricks for all missing packages in one call for speed, explicitly
-  # targeting our prefix. Without WINEPREFIX= winetricks would fall back to
-  # ~/.wine instead of our isolated prefix at ~/.cluckers/prefix.
+  # Run all missing packages in a single winetricks call for speed. Multiple
+  # packages in one call avoids repeatedly starting and stopping Wine.
+  #
+  # The environment variables below are critical for a fast, clean install:
+  #
+  # WINEPREFIX=  — tells winetricks to install into our game's Wine prefix
+  #   (~/.cluckers/prefix) instead of the default ~/.wine. Without this,
+  #   winetricks would install packages into the wrong place entirely.
+  #
+  # DISPLAY=""   — prevents Wine from opening graphical installer windows.
+  #   The Visual C++ installers normally show a progress dialog that causes
+  #   Wine to spawn a full display server process inside a background thread.
+  #   That process grows by ~7 MB/s with no visible activity in the terminal,
+  #   making the install appear to hang. Setting DISPLAY="" prevents this.
+  #
+  # WINEDLLOVERRIDES="mscoree,mshtml=" — stops Wine from auto-installing Mono
+  #   (.NET runtime) and Gecko (Internet Explorer engine) when the prefix is
+  #   first touched. Wine tries to download these automatically, but we don't
+  #   need them for this game and they add several minutes of download time.
   # shellcheck disable=SC2086
   if WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
+     DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
      winetricks ${wt_flags} "${to_install[@]}"; then
     ok_msg "${desc} installed successfully."
   else
     warn_msg "Some components in '${desc}' failed to install — continuing anyway."
   fi
 
-  # Kill any wineserver processes left behind by winetricks.
+  # Wait for wineserver to finish all pending work, then stop it.
+  #
+  # wineserver is a background process Wine uses to manage its internal state
+  # (similar to a Windows kernel process). After winetricks finishes, wineserver
+  # keeps running until told to stop. Without "-w" (wait), wineserver lingers in
+  # the background consuming ~7 MB/s of memory (visible in htop/btop as a Wine
+  # process with high priority). "-w" waits for it to finish gracefully; "-k"
+  # then sends a kill signal to any that did not exit on their own.
+  env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -w 2>/dev/null || true
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 }
 
@@ -544,15 +735,17 @@ install_winetricks_multi() {
 #  Version resolution
 # ==============================================================================
 
-# Fetches version metadata from the update server into VERSION_INFO_JSON.
-# The version.json schema is defined in:
-# https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
+# Fetches game version metadata from the update server.
 #
-# Globals set:
-#   VERSION_INFO_JSON
+# Sends a request to UPDATER_URL and stores the JSON response in the global
+# variable VERSION_INFO_JSON. Other functions call parse_version_field() to
+# read specific fields (download URL, checksum, version string, etc.) from it.
+#
+# Arguments:
+#   None.
 #
 # Returns:
-#   0 on success, 1 on network error or unrecognised response.
+#   0 on success; 1 if the server is unreachable or the response is malformed.
 fetch_version_info() {
   info_msg "Querying update server for the latest game version..."
 
@@ -589,8 +782,8 @@ EOF
 # Arguments:
 #   $1 - JSON key name (e.g. "zip_url").
 #
-# Outputs:
-#   Field value to stdout.
+# Returns:
+#   Prints the field value to stdout. Prints an empty string if not found.
 parse_version_field() {
   local -r field="$1"
   python3 - "${VERSION_INFO_JSON}" << EOF
@@ -607,13 +800,20 @@ EOF
 #  Checksum verification
 # ==============================================================================
 
-# Verifies a file's SHA-256 checksum, exiting on mismatch.
+# Verifies a file's SHA-256 checksum and exits the script on mismatch.
 #
-# Skips silently when the expected value is the all-zeros placeholder.
+# A mismatch means the file is corrupt or has been tampered with. The script
+# exits rather than continuing with a bad binary to prevent subtle breakage.
+# Skips silently when the expected value is the all-zeros placeholder, which
+# signals "checksum not yet known" during development.
 #
 # Arguments:
-#   $1 - Path to file.
-#   $2 - Expected SHA-256 hex string (64 chars).
+#   $1  Path to the file to verify.
+#   $2  Expected SHA-256 hex string (64 lowercase hex characters).
+#
+# Returns:
+#   0 if the checksum matches or is the all-zeros placeholder.
+#   Does not return on mismatch; exits the process.
 verify_sha256() {
   local -r file_path="$1"
   local -r expected="$2"
@@ -642,12 +842,19 @@ verify_sha256() {
 # ==============================================================================
 
 # Removes everything this script created and cleans up Steam configuration.
-# Steam shortcut ID computation mirrors:
-# https://github.com/0xc0re/cluckers/blob/master/internal/cli/steam_linux.go
 #
-# Globals:
-#   WINEPREFIX, LAUNCHER_SCRIPT, DESKTOP_FILE,
-#   ICON_PATH, TOOLS_DIR, REALM_ROYALE_APPID, APP_NAME
+# Deletes the Wine prefix, game files, launcher script, .desktop shortcut,
+# icon, tools, and the Steam non-Steam-game shortcut entry. The Steam shortcut
+# ID computation mirrors the Go implementation so the correct entry is removed.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   Always 0.
+#
+# Source (shortcut ID algorithm):
+#   https://github.com/0xc0re/cluckers/blob/master/internal/cli/steam_linux.go
 run_uninstall() {
   step_msg "Uninstalling Cluckers Central..."
 
@@ -850,14 +1057,23 @@ PYEOF
 #  Main install
 # ==============================================================================
 
-# Downloads a file in parallel chunks using curl and HTTP range requests.
-# Falls back to a single-threaded curl download with resume support if the
-# server does not advertise Accept-Ranges: bytes.
-# Source: https://github.com/0xc0re/cluckers/blob/master/internal/game/download.go
+# Downloads a file using parallel HTTP range requests for maximum speed.
+#
+# Splits the file into N chunks (one per CPU thread, capped at 8) and downloads
+# each chunk concurrently with curl using HTTP Range headers. Recombines the
+# chunks into the final file with cat. Falls back to a single-threaded curl
+# download with resume support (-C -) if the server does not advertise
+# "Accept-Ranges: bytes", which is required for range requests to work.
 #
 # Arguments:
-#   $1 - url:  Direct download URL.
-#   $2 - dest: Destination file path.
+#   $1  Direct HTTP/HTTPS download URL.
+#   $2  Destination file path to write the completed download.
+#
+# Returns:
+#   0 on success; 1 on download failure.
+#
+# Source (parallel download logic):
+#   https://github.com/0xc0re/cluckers/blob/master/internal/game/download.go
 parallel_download() {
   local url="$1"
   local dest="$2"
@@ -883,9 +1099,11 @@ parallel_download() {
   local headers
   headers=$(curl -sI -L "$url" 2>/dev/null)
   local size
-  size=$(printf '%s' "$headers" | grep -i '^content-length:' | tail -n1 | awk '{print $2}' | tr -d '\r')
+  size=$(printf '%s' "$headers" \
+    | grep -i '^content-length:' | tail -n1 | awk '{print $2}' | tr -d '\r')
   local accept_ranges
-  accept_ranges=$(printf '%s' "$headers" | grep -i '^accept-ranges:' | tail -n1 | tr -d '\r' | awk '{print $2}')
+  accept_ranges=$(printf '%s' "$headers" \
+    | grep -i '^accept-ranges:' | tail -n1 | tr -d '\r' | awk '{print $2}')
 
   # If the server doesn't support range requests, or we couldn't get the file
   # size, fall back to a single-threaded download with resume support.
@@ -959,8 +1177,10 @@ parallel_download() {
       local current_size=0
       for ((i=0; i<threads; i++)); do
         local ps=0 tmps=0
-        [[ -f "${dest}.part${i}" ]]     && ps=$(stat   -c%s "${dest}.part${i}"     2>/dev/null || echo 0)
-        [[ -f "${dest}.part${i}.tmp" ]] && tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
+        [[ -f "${dest}.part${i}" ]] \
+          && ps=$(stat -c%s "${dest}.part${i}" 2>/dev/null || echo 0)
+        [[ -f "${dest}.part${i}.tmp" ]] \
+          && tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
         current_size=$(( current_size + ps + tmps ))
       done
 
@@ -1178,9 +1398,11 @@ ZIPBLAKE3EOF
   # ---- Extract in place -------------------------------------------------------
   info_msg "Extracting update (this may take several minutes)..."
   if command -v bsdtar >/dev/null 2>&1; then
-    bsdtar -xf "${zip_path}" -C "${GAME_DIR}" || error_exit "Extraction failed. Re-run with --update to retry."
+    bsdtar -xf "${zip_path}" -C "${GAME_DIR}" \
+      || error_exit "Extraction failed. Re-run with --update to retry."
   elif command -v 7z >/dev/null 2>&1; then
-    7z x -y "${zip_path}" -o"${GAME_DIR}" || error_exit "Extraction failed. Re-run with --update to retry."
+    7z x -y "${zip_path}" -o"${GAME_DIR}" \
+      || error_exit "Extraction failed. Re-run with --update to retry."
   else
     UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -o "${zip_path}" -d "${GAME_DIR}" \
       || error_exit "Extraction failed. Re-run with --update to retry."
@@ -1253,14 +1475,18 @@ apply_game_patches() {
 
   # List all applicable patches based on preferences
   info_msg "Evaluating applicable patches:"
-  [[ "${skip_movies_flag}" == "true" ]] && info_msg "  • [Skip Movies] Force intro movies to be skipped"
-  [[ "${skip_movies_flag}" == "false" ]] && info_msg "  • [Restore Movies] Re-enable intro movies"
-  [[ "${steam_deck_flag}" == "true" ]] && info_msg "  • [Steam Deck] Force 1280x800 resolution and fullscreen"
+  [[ "${skip_movies_flag}" == "true" ]] \
+    && info_msg "  • [Skip Movies] Force intro movies to be skipped"
+  [[ "${skip_movies_flag}" == "false" ]] \
+    && info_msg "  • [Restore Movies] Re-enable intro movies"
+  [[ "${steam_deck_flag}" == "true" ]] \
+    && info_msg "  • [Steam Deck] Force 1280x800 resolution and fullscreen"
   if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
     info_msg "  • [Controller] Force engine-level input to Gamepad"
     info_msg "  • [Controller] Neutralize phantom mouse-axis counters (fixes KB/M switching)"
   fi
-  [[ "${steam_deck_flag}" == "true" ]] && info_msg "  • [Steam Deck] Deploy custom button layout template"
+  [[ "${steam_deck_flag}" == "true" ]] \
+    && info_msg "  • [Steam Deck] Deploy custom button layout template"
 
   # Remember preference if requested.
   if [[ "${controller_flag}" == "true" ]]; then
@@ -1365,8 +1591,11 @@ DECK_DISPLAY_EOF
 
   # -- Input: remove phantom mouse-axis counters (Deck or Controller mode) ---
   if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
-    # CrossplayInputMethod fix to force gamepad (resolves "Unassigned" button issues)
-    # See: https://www.pcgamingwiki.com/wiki/Paladins#Controller_support and https://www.protondb.com/app/444090
+    # CrossplayInputMethod=Gamepad forces the UE3 engine to treat all input as
+    # gamepad, resolving "Unassigned" button labels and preventing the engine
+    # from switching back to keyboard/mouse mode during map transitions.
+    # Source: https://www.pcgamingwiki.com/wiki/Paladins#Controller_support
+    #         (CrossplayInputMethod ini key documented under Controller support)
     info_msg "Patch: Forcing engine-level input to Gamepad (Controller mode)..."
     ini="${config_dir}/RealmGame.ini"
     if [[ -f "${ini}" ]]; then
@@ -1509,7 +1738,8 @@ DECK_INPUT_EOF
     # Preserves any existing user-customised layout (never overwrites).
     # Deploys the Steam Deck button layout template to Steam's controller config.
     local vdf_tmp
-    vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX --suffix=.vdf)
+    vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX --suffix=.vdf) \
+      || { warn_msg "mktemp failed — skipping controller layout deploy."; return 0; }
     base64 -d << 'NEPTUNE_B64_EOF' > "${vdf_tmp}"
 ImNvbnRyb2xsZXJfbWFwcGluZ3MiCnsKCSJ2ZXJzaW9uIiAiMyIKCSJnYW1lIiAiUmVhbG0gUm95
 YWxlIChDbHVja2VycykiCgkidGl0bGUiICIjVGl0bGUiCgkiZGVzY3JpcHRpb24iICIjRGVzY3Jp
@@ -1705,16 +1935,28 @@ DECK_LAYOUT_EOF
 
   ok_msg "Game patches applied."
 }
-# Locates the newest Proton-GE installation or falls back to system Wine.
-# Searches common Steam, Lutris, and Bottles runner directories, picks the
-# highest-versioned GE-Proton, and verifies it can run before selecting it.
+# Finds the best available Wine or Proton-GE binary on this system.
+#
+# Proton-GE is a community-built version of Proton (Valve's Windows-game
+# compatibility layer) with additional patches and newer components than the
+# version shipped with Steam. It typically provides better game compatibility
+# and performance than the standard system Wine package.
+#
+# This function searches common install locations for Proton-GE (Steam,
+# Lutris, and Bottles runner directories), picks the highest-version copy
+# found, and verifies it can actually run before selecting it. Falls back
+# to system Wine if no Proton-GE installation is found.
+#
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/wine/detect.go
 #
 # Arguments:
-#   $1 - variable name to store the wine binary path
-#   $2 - variable name to store the is_proton boolean ("true"/"false")
-#   $3 - variable name to store the proton tool name
-#   $4 - variable name to store the wineserver binary path
+#   $1  Name of the variable to receive the wine binary path.
+#   $2  Name of the variable to receive a "true"/"false" is-Proton flag.
+#   $3  Name of the variable to receive the tool name (e.g. "Proton-GE-9-5").
+#   $4  Name of the variable to receive the wineserver binary path.
+#
+# Returns:
+#   Always 0. Output is written to the named variables via nameref.
 find_wine() {
   local -n _out_path=$1
   local -n _out_is_proton=$2
@@ -1768,7 +2010,8 @@ find_wine() {
 
     # 2. Check for common Proton and custom Wine prefixes
     # Use a broad glob to find GE-Proton, proton-cachyos, lutris-ge, etc.
-    for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
+    for p in "${d}"/GE-Proton* "${d}"/proton-cachyos* \
+              "${d}"/proton-ge-custom "${d}"/lutris-* "${d}"/wine-ge-*; do
       if [[ -f "${p}/files/bin/wine64" ]]; then
         base=$(basename "${p}")
         # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
@@ -1777,23 +2020,24 @@ find_wine() {
           minor="${BASH_REMATCH[2]}"
           ver=$(printf "%05d-%05d" "${major}" "${minor}")
           if [[ "${ver}" > "${newest_version}" || -z "${newest_proton}" ]]; then
-            # Sanity check: Can this Wine actually run a basic command?
-            if "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+            # Sanity-check: use --version (pure print, no wineserver spawn) instead
+            # of wineboot --version which initialises a wineserver process and causes
+            # the 7 MB/s memory-growth symptom seen in btop during detection.
+            if "${p}/files/bin/wine64" --version >/dev/null 2>&1; then
               newest_version="${ver}"
               newest_proton="${p}/files/bin/wine64"
             fi
           fi
         elif [[ -z "${newest_proton}" ]]; then
-          # Fallback for other Protons without standard GE versioning
-          # Sanity check: Can this Wine actually run a basic command?
-          if "${p}/files/bin/wine64" wineboot --version >/dev/null 2>&1; then
+          # Fallback for other Protons without standard GE versioning.
+          if [[ -x "${p}/files/bin/wine64" ]]; then
             newest_proton="${p}/files/bin/wine64"
           fi
         fi
       elif [[ -f "${p}/bin/wine64" ]]; then
         # Handle versions that don't use 'files' subfolder (e.g. some Lutris/Bottles runners)
         if [[ -z "${newest_proton}" ]]; then
-          if "${p}/bin/wine64" wineboot --version >/dev/null 2>&1; then
+          if [[ -x "${p}/bin/wine64" ]]; then
             newest_proton="${p}/bin/wine64"
           fi
         fi
@@ -1893,7 +2137,8 @@ main() {
   for arg in "$@"; do
     case "${arg}" in
       --uninstall)
-        printf "\n%b[WARN]%b This will permanently remove Cluckers Central, the Wine prefix,\n" "${YELLOW}" "${NC}"
+        printf "\n%b[WARN]%b This will permanently remove Cluckers Central, the Wine prefix,\n" \
+          "${YELLOW}" "${NC}"
         printf "        all game files in ~/.cluckers, and Steam shortcuts.\n"
         printf "        This action cannot be undone.\n\n"
         printf "  Type 'yes' to confirm: "
@@ -1912,8 +2157,14 @@ main() {
       --no-gamescope)    use_gamescope="false" ;;
       --steam-deck|-d)   steam_deck="true"; use_gamescope="false"; controller_mode="true" ;;
       --controller|-c)   controller_mode="true" ;;
-      --no-controller)   controller_mode="false"; [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}" ;;
-      --skip-movies)     skip_movies="true"; [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}" ;;
+      --no-controller)
+        controller_mode="false"
+        [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}"
+        ;;
+      --skip-movies)
+        skip_movies="true"
+        [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}"
+        ;;
       --show-movies|-m)  skip_movies="false" ;;
       --help|-h)         print_help; exit 0 ;;
       *) warn_msg "Unknown flag ignored: '${arg}' (try --help for usage)" ;;
@@ -1977,8 +2228,11 @@ main() {
   local maint_wine="wine"
   local maint_server="wineserver"
 
-  if [[ -n "${real_wine_path}" ]] && "${real_wine_path}" wineboot --version >/dev/null 2>&1; then
-    # The detected Wine is standalone-functional (e.g. GE-Proton or system Wine).
+  # Use --version (pure print, no wineserver spawn) to check the Wine binary is
+  # functional. wineboot --version was used previously but initialises a wineserver
+  # process that grows in memory (the 7 MB/s btop symptom) even before Step 3.
+  if [[ -n "${real_wine_path}" ]] && "${real_wine_path}" --version >/dev/null 2>&1; then
+    # The detected Wine is functional (e.g. GE-Proton or system Wine).
     maint_wine="${real_wine_path}"
     maint_server="${real_wineserver}"
     info_msg "Using Wine binary: ${real_wine_path}"
@@ -2022,7 +2276,7 @@ main() {
   [[ "${use_gamescope}" == "true" ]] && extra_tools+=("gamescope")
   install_sys_deps "${pkg_mgr}" "${extra_tools[@]}"
 
-  # Ensure winetricks is recent enough to know about vcrun2022 and dxvk 2.x.
+  # Ensure winetricks is recent enough to know about vcrun2019 and dxvk 2.x.
   # Distro packages are often many months behind; we fetch the latest from the
   # official Winetricks GitHub repo so verb downloads use correct, live URLs.
   step_msg "Step 1b — Ensuring winetricks is up-to-date..."
@@ -2064,7 +2318,8 @@ main() {
   local -a py_libs=(vdf blake3)
   local lib
   for lib in "${py_libs[@]}"; do
-    if PYTHONPATH="${CLUCKERS_PYLIBS}${PYTHONPATH:+:${PYTHONPATH}}" python3 -c "import ${lib}" > /dev/null 2>&1; then
+    if PYTHONPATH="${CLUCKERS_PYLIBS}${PYTHONPATH:+:${PYTHONPATH}}" \
+         python3 -c "import ${lib}" > /dev/null 2>&1; then
       ok_msg "Python '${lib}' library is already installed."
     else
       info_msg "Installing Python '${lib}' library to local profile (showing pip output)..."
@@ -2199,61 +2454,155 @@ main() {
       DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
         WINE="${maint_wine}" WINESERVER="${maint_server}" \
         "${maint_wine}" wineboot --init || true
-      # Stabilize the prefix
-      WINESERVER="${maint_server}" "${maint_server}" -w || true
+      # Stabilize the prefix — wait for all Wine children to exit cleanly.
+      WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_server}" -w || true
     fi
     ok_msg "Wine prefix created."
   fi
 
   if [[ "${controller_mode}" == "true" ]]; then
+    # Check that the user has read access to /dev/input/event* nodes.
+    # Without this, Wine's SDL layer cannot enumerate the controller and it
+    # will appear invisible to the game regardless of other settings.
+    # The standard fix is to be a member of the 'input' group.
+    # Source: https://wiki.archlinux.org/title/Gamepad#Setting_up_a_gamepad
+    local _event_found="false"
+    local _event_readable="false"
+    local _ev
+    for _ev in /dev/input/event*; do
+      [[ -e "${_ev}" ]] || continue
+      _event_found="true"
+      [[ -r "${_ev}" ]] && { _event_readable="true"; break; }
+    done
+    if [[ "${_event_found}" == "false" ]]; then
+      warn_msg "No /dev/input/event* nodes found — controller may not be connected."
+    elif [[ "${_event_readable}" == "false" ]]; then
+      warn_msg "You may not have read access to /dev/input/event* devices."
+      warn_msg "Fix: sudo usermod -aG input \$USER  (then log out and back in)"
+      warn_msg "Source: https://wiki.archlinux.org/title/Gamepad#Setting_up_a_gamepad"
+    fi
+
+    # Suggest SDL_GameControllerDB if not already installed.
+    # This community database provides correct button mappings for thousands
+    # of controllers, fixing mis-mapped triggers, bumpers, and face buttons
+    # under Wine's SDL layer. Highly recommended for any non-Xbox controller.
+    # Source: https://github.com/gabomdq/SDL_GameControllerDB
+    local _sdl_db_found="false"
+    for _db_path in \
+      "${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
+      "${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt" \
+      "/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
+      "/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt"; do
+      if [[ -f "${_db_path}" ]]; then
+        _sdl_db_found="true"
+        ok_msg "SDL GameControllerDB found at ${_db_path} — will be loaded by launcher."
+        break
+      fi
+    done
+    if [[ "${_sdl_db_found}" == "false" ]]; then
+      info_msg "Tip: Install SDL_GameControllerDB for correct controller button mappings:"
+      info_msg "  mkdir -p ~/.local/share/SDL_GameControllerDB"
+      info_msg "  curl -L https://raw.githubusercontent.com/gabomdq/SDL_GameControllerDB/master/gamecontrollerdb.txt \\"
+      info_msg "       -o ~/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt"
+      info_msg "Source: https://github.com/gabomdq/SDL_GameControllerDB"
+    fi
+
     info_msg "Applying WineBus SDL mapping for controllers..."
-    # Forces Wine to use the SDL2 library instead of raw HID (fixes double-input/mapping).
-    # See: https://wiki.winehq.org/Useful_Registry_Keys
-    env WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_wine}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v DisableHidraw /t REG_DWORD /d 1 /f || true
-    env WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_wine}" reg add "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus" /v EnableSDL /t REG_DWORD /d 1 /f || true
+    # Configure Wine's controller input backend to use SDL2 instead of hidraw.
+    #
+    # Wine can talk to controllers in two ways: through "hidraw" (a Linux kernel
+    # interface that reads raw USB data) or through SDL2 (a cross-platform game
+    # library with built-in controller support). When both are active at the same
+    # time, the controller appears twice to the game — once from hidraw and once
+    # from SDL2. Unreal Engine 3 adds both sets of axis events together, resulting
+    # in phantom camera spin where the camera rotates by itself even without
+    # touching the stick.
+    #
+    # DisableHidraw=1 — tells Wine's winebus.sys driver to stop reading the
+    #   controller through the hidraw kernel interface, eliminating the duplicate.
+    # EnableSDL=1 — tells Wine to use the SDL2 library as the sole controller
+    #   input source, which correctly maps axes, buttons, and triggers.
+    #
+    # These are registry keys read by Wine's controller driver (winebus.sys).
+    # Source: https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/winebus.sys/main.c
+    #         (options.disable_hidraw ~line 518, options.disable_sdl ~line 541)
+    local winebus_key
+    winebus_key="HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus"
+    DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
+      "${maint_wine}" reg add "${winebus_key}" \
+      /v DisableHidraw /t REG_DWORD /d 1 /f 2>/dev/null || true
+    DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
+      "${maint_wine}" reg add "${winebus_key}" \
+      /v EnableSDL /t REG_DWORD /d 1 /f 2>/dev/null || true
+    # Wait for wineserver to finish processing registry writes before continuing.
+    env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -w 2>/dev/null || true
+    env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
   fi
 
   # --------------------------------------------------------------------------
   # Step 4 — Windows runtime libraries
   #
-  # vcrun2010 / vcrun2012 / vcrun2022
-  #   — Visual C++ Redistributables required by the game. Each covers a
-  #     distinct runtime DLL set (msvcp*.dll, vcruntime*.dll, etc.).
-  #     All three are required simultaneously because the game engine and its
-  #     dependencies link against multiple VC++ generations:
-  #       vcrun2010 → msvcp100.dll / msvcr100.dll
-  #       vcrun2012 → msvcp110.dll / msvcr110.dll
-  #       vcrun2022 → msvcp140.dll / vcruntime140.dll / vcruntime140_1.dll
-  #     vcrun2022 is a strict superset of vcrun2019/2017/2015 — they all ship
-  #     the same vc_redist installer with the same CRT DLLs; 2022 is the latest
-  #     revision and installs vcruntime140_1.dll additionally, so the older
-  #     versions are redundant and intentionally omitted.
-  #     Missing any of these three causes a silent "DLL not found" crash at
-  #     launch or during the loading screen.
+  # The game is a Windows program running inside Wine on Linux. Wine provides
+  # a compatibility layer that translates Windows system calls to Linux, but it
+  # does not include the C++ standard library DLLs or the DirectX graphics
+  # libraries that the game was compiled against. Those must be installed
+  # separately into the Wine prefix — that is what this step does.
   #
-  # dxvk      — Vulkan-backed Direct3D 11 implementation. Replaces Wine's
-  #   built-in d3d11 with a much faster Vulkan path. Also provides the
-  #   d3d11.dll that the game requires at launch. Requires a Vulkan-capable
-  #   GPU and driver (NVIDIA ≥ 470, AMD Mesa ≥ 21.x, Intel ≥ ANV).
+  # Think of it like this: if you took a Windows game and tried to run it on a
+  # fresh Windows install without the Visual C++ Redistributable packages, it
+  # would fail to start with a "DLL not found" error. The same is true here.
   #
-  # d3dx11_43 — DirectX 11 helper DLL (d3dx11_43.dll) required by the game.
+  # Each package is checked before downloading. If it is already installed
+  # (from a previous run, or by Proton), the download is skipped entirely.
   #
-  # All packages are installed in a single winetricks call for speed. Each is
-  # recorded under ${WINEPREFIX}/winetricks/<verb>/ by winetricks itself after
-  # a successful install, so re-runs skip already-installed verbs instantly
-  # without re-downloading anything.
+  # vcrun2010  Visual C++ 2010 runtime (msvcp100.dll, msvcr100.dll).
+  #            The core Unreal Engine 3 code was compiled with Microsoft Visual
+  #            Studio 2010 and requires these DLLs at startup. Missing them
+  #            causes the game to crash immediately with a "DLL not found" error.
+  #            Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+  #                    w_metadata vcrun2010 installed_file1=mfc100.dll
+  #
+  # vcrun2012  Visual C++ 2012 runtime (msvcp110.dll, msvcr110.dll).
+  #            The game's networking and audio subsystems were compiled with a
+  #            newer toolchain than the engine core and require these DLLs.
+  #            Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+  #                    w_metadata vcrun2012 installed_file1=mfc110.dll
+  #
+  # vcrun2019  Visual C++ 2015-2019 runtime (msvcp140.dll, vcruntime140.dll,
+  #            vcruntime140_1.dll). The game launcher and EAC anti-cheat system
+  #            require these DLLs. We install vcrun2019 rather than vcrun2022
+  #            because vcrun2022 bundles extra localised MFC resource DLLs
+  #            (mfc140chs.dll, mfc140deu.dll, etc.) that the game does not need,
+  #            adding unnecessary download size. Both versions provide the same
+  #            core runtime DLLs that matter.
+  #            Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+  #                    w_metadata vcrun2019 installed_file1=vcruntime140.dll
+  #
+  # dxvk       Vulkan-based Direct3D implementation for Wine. Replaces Wine's
+  #            built-in Direct3D 11 with a high-performance Vulkan translation
+  #            layer. This dramatically improves frame rate and reduces CPU usage
+  #            compared to Wine's own Direct3D implementation. Requires a
+  #            Vulkan-capable GPU: NVIDIA (driver ≥ 470), AMD (Mesa ≥ 21.x),
+  #            or Intel (ANV Vulkan driver).
+  #            Source: https://github.com/doitsujin/dxvk
+  #
+  # d3dx11_43  A DirectX 11 helper DLL (d3dx11_43.dll) used by the game's
+  #            shader compilation system at startup. Without it, the game may
+  #            fail to load shaders and render incorrectly or not at all.
+  #            Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
+  #                    w_metadata d3dx11_43 installed_file1=d3dx11_43.dll
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
-  # Ensure no orphaned wineservers are running from previous steps/runs.
+  # Kill any orphaned wineserver from previous steps before running winetricks.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 
-  # These packages are the exact set the game requires to run correctly:
-  # vcrun2022 is a strict superset of vcrun2019 — it ships a newer revision of
-  # the same vc_redist package and installs vcruntime140_1.dll on top, so
-  # vcrun2019 is intentionally omitted to avoid a redundant download.
-  install_winetricks_multi "Windows runtime libraries" "${maint_wine}" "${maint_server}" "${auto_mode}" \
-    "vcrun2010" "vcrun2012" "vcrun2022" "dxvk" "d3dx11_43"
+  install_winetricks_multi \
+    "Windows runtime libraries" \
+    "${maint_wine}" \
+    "${maint_server}" \
+    "${auto_mode}" \
+    "vcrun2010" "vcrun2012" "vcrun2019" "dxvk" "d3dx11_43"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
@@ -2322,9 +2671,11 @@ BLAKE3EOF
     # Extract the zip.
     info_msg "Extracting game files (this may take several minutes)..."
     if command -v bsdtar >/dev/null 2>&1; then
-      bsdtar -xf "${zip_path}" -C "${GAME_DIR}" || error_exit "Extraction failed. Try re-running to re-download."
+      bsdtar -xf "${zip_path}" -C "${GAME_DIR}" \
+        || error_exit "Extraction failed. Try re-running to re-download."
     elif command -v 7z >/dev/null 2>&1; then
-      7z x -y "${zip_path}" -o"${GAME_DIR}" || error_exit "Extraction failed. Try re-running to re-download."
+      7z x -y "${zip_path}" -o"${GAME_DIR}" \
+        || error_exit "Extraction failed. Try re-running to re-download."
     else
       UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -o "${zip_path}" -d "${GAME_DIR}" \
         || error_exit "Extraction failed. Try re-running to re-download."
@@ -2694,11 +3045,13 @@ BLAKE3EOF
 #   /*
 #    * XInputEnable(FALSE) no-op:
 #    * UE3 calls XInputEnable(FALSE) on WM_ACTIVATEAPP when the window loses focus
-#    * during ServerTravel map transitions (lobby -> match). Wine's compliant
-#    * implementation zeros all XInput state data, causing invisible controller
-#    * input loss for the entire match. This is the same pattern fixed in Proton
-#    * 8.0-4 for Overwatch 2. We block FALSE to prevent disabling, but forward
-#    * TRUE (harmless, keeps state consistent).
+#    * during ServerTravel map transitions (lobby -> match). Wine's XInputEnable()
+#    * implementation calls controller_disable() on all four XInput slots, zeroing
+#    * all axis/button state and making the controller invisible for the rest of
+#    * the match. We intercept and drop FALSE calls to prevent this, but forward
+#    * TRUE so re-enable still works correctly.
+#    * Source (Wine xinput1_3 XInputEnable implementation):
+#    *   https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/xinput1_3/xinput_main.c
 #    */
 #   __declspec(dllexport) void WINAPI XInputEnable(BOOL e) {
 #       proxy_init();
@@ -12047,18 +12400,20 @@ XDLL_B64_EOF
     verify_sha256 "${xdll_tmp}" "${XINPUT_DLL_SHA256}"
     mv "${xdll_tmp}" "${xdll_dst}"
     ok_msg "xinput1_3.dll installed."
-  fi
-  fi
-
-  # Install xinput1_3.dll into the Wine prefix system32 so Wine loads it
-  # instead of the built-in stub when the game requests XInput.
-  local wine_sys32="${WINEPREFIX}/drive_c/windows/system32"
-  mkdir -p "${wine_sys32}"
-      if [[ "${controller_mode}" == "true" ]]; then
-        cp "${xdll_dst}" "${wine_sys32}/xinput1_3.dll"
-        ok_msg "xinput1_3.dll placed in Wine system32."
-      fi
     fi
+
+    # Install xinput1_3.dll into the Wine prefix system32 so Wine loads it
+    # instead of the built-in stub when the game requests XInput.
+    # Wine resolves DLLs from the prefix system32 before its own built-in stubs,
+    # so placing our remapper here ensures it intercepts all XInput calls.
+    # Source: https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/xinput1_3/xinput_main.c
+    local wine_sys32="${WINEPREFIX}/drive_c/windows/system32"
+    mkdir -p "${wine_sys32}"
+    if [[ -f "${xdll_dst}" ]]; then
+      cp "${xdll_dst}" "${wine_sys32}/xinput1_3.dll"
+      ok_msg "xinput1_3.dll placed in Wine system32."
+    fi
+  fi
 
     # --------------------------------------------------------------------------
   # Step 7 — Extract desktop icon
@@ -12186,10 +12541,43 @@ export WINEDEBUG="-all"
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process_linux.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
   printf 'export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"\n'
-  # Controller detection: Source: Hi-Rez community fixes for Linux.
-  # Disabling SDL HIDAPI prevents double-detection and camera spin bugs.
+  # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
+  # all joysticks. Without this, Wine's winebus.sys and SDL's HIDAPI layer both
+  # enumerate the same physical device, causing duplicate axis events and phantom
+  # camera spin in UE3 games. SDL_HINT_JOYSTICK_HIDAPI_PS4 / _PS5 are per-device
+  # overrides for the same hint applied specifically to DualShock 4 / DualSense.
+  # Source (hint definition): https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
+  #   SDL_HINT_JOYSTICK_HIDAPI          ~line 828
+  #   SDL_HINT_JOYSTICK_HIDAPI_PS4      ~line 969
+  # Source (Wine SDL joystick backend): https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/winebus.sys/main.c
   printf 'export SDL_JOYSTICK_HIDAPI=0\n'
+  printf 'export SDL_JOYSTICK_HIDAPI_PS4=0\n'
   printf 'export SDL_JOYSTICK_HIDAPI_PS5=0\n'
+  # SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS — when set to "1", SDL continues
+  # delivering joystick events even when the application window does not have
+  # focus. UE3's ServerTravel (lobby→match transition) briefly defocuses the
+  # window; without this hint SDL silences all joystick axis/button events during
+  # that window, compounding the XInputEnable(FALSE) issue our xinput1_3.dll fixes.
+  # Source: https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
+  #         SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS ~line 693
+  printf 'export SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1\n'
+  # SDL_HINT_GAMECONTROLLERCONFIG_FILE — path to a community gamecontrollerdb.txt
+  # mapping file. SDL reads this file to override built-in button/axis mappings
+  # for any controller GUID. Fixes mis-mapped triggers, bumpers, and face buttons
+  # on non-Xbox controllers under Wine's SDL layer.
+  # Source: https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
+  #         SDL_HINT_GAMECONTROLLERCONFIG_FILE ~line 513
+  # Community mapping database: https://github.com/gabomdq/SDL_GameControllerDB
+  # If the file exists in a standard location we export the path so Wine/SDL picks it up.
+  printf '_sdl_db=""\n'
+  printf 'for _db_path in \\\n'
+  printf '  "\${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
+  printf '  "\${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
+  printf '  "/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
+  printf '  "/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt"; do\n'
+  printf '  if [[ -f "\${_db_path}" ]]; then _sdl_db="\${_db_path}"; break; fi\n'
+  printf 'done\n'
+  printf '[[ -n "\${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="\${_sdl_db}"\n'
 else
   printf 'export WINEDLLOVERRIDES="dxgi=n"\n'
 fi)
@@ -12787,6 +13175,8 @@ fi
   fi
 
   apply_game_patches "${GAME_DIR}" "${steam_deck}" "${controller_mode}" "${skip_movies}"
+
+  fi # end skip_heavy_steps
 
   printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
   printf "%b║              Installation complete!                  ║%b\n" "${GREEN}" "${NC}"
