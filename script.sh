@@ -324,6 +324,26 @@ print_help() {
 #   0 if found, 1 if not found.
 command_exists() { command -v "$1" > /dev/null 2>&1; }
 
+# Returns 0 if the named package is installed according to the package manager.
+#
+# Arguments:
+#   $1 - Package manager name.
+#   $2 - Package name.
+#
+# Returns:
+#   0 if installed, 1 if not.
+is_pkg_installed() {
+  local mgr="$1"
+  local pkg="$2"
+  case "${mgr}" in
+    apt)    dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q "install ok installed" ;;
+    pacman) pacman -Qq "${pkg}" >/dev/null 2>&1 ;;
+    dnf)    rpm -q "${pkg}" >/dev/null 2>&1 ;;
+    zypper) zypper se --installed-only "${pkg}" >/dev/null 2>&1 ;;
+    *)      return 1 ;;
+  esac
+}
+
 # ==============================================================================
 #  System dependency helpers
 # ==============================================================================
@@ -469,37 +489,45 @@ install_sys_deps() {
   info_msg "Checking for: ${tools[*]}..."
   for tool in "${tools[@]}" "$@"; do
     if ! command_exists "${tool}"; then
-      to_install+=("${tool}")
+      # If binary doesn't exist, check if the package is missing.
+      # Some distros name packages differently than binaries.
+      local pkg_name="${tool}"
+      [[ "${pkg_mgr}" == "apt" && "${tool}" == "wine" ]] && pkg_name="wine64"
+      
+      if ! is_pkg_installed "${pkg_mgr}" "${pkg_name}"; then
+        to_install+=("${pkg_name}")
+      fi
     fi
   done
 
   # Explicitly check for pip / pip3.
   if ! command_exists pip && ! command_exists pip3; then
-    case "${pkg_mgr}" in
-      apt)    to_install+=("python3-pip") ;;
-      pacman) to_install+=("python-pip") ;;
-      dnf)    to_install+=("python3-pip") ;;
-      zypper) to_install+=("python3-pip") ;;
-    esac
+    local pip_pkg="python3-pip"
+    [[ "${pkg_mgr}" == "pacman" ]] && pip_pkg="python-pip"
+    if ! is_pkg_installed "${pkg_mgr}" "${pip_pkg}"; then
+      to_install+=("${pip_pkg}")
+    fi
   fi
 
   # Some distros provide wine/winetricks commands via package names that differ
-  # from binary names. Ensure apt users still receive the full runtime stack
-  # only when those packages are actually missing.
+  # from binary names. Ensure apt users still receive the full runtime stack.
   if [[ "${pkg_mgr}" == "apt" ]]; then
-    if ! dpkg-query -W -f='${Status}' wine32:i386 2>/dev/null | grep -q "install ok installed"; then
-      to_install+=("wine32:i386")
-    fi
-    if ! dpkg-query -W -f='${Status}' wine64 2>/dev/null | grep -q "install ok installed"; then
-      to_install+=("wine64")
-    fi
-    if ! dpkg-query -W -f='${Status}' libwine:i386 2>/dev/null \
-         | grep -q "install ok installed"; then
-      to_install+=("libwine:i386")
-    fi
-    if ! dpkg-query -W -f='${Status}' fonts-wine 2>/dev/null | grep -q "install ok installed"; then
-      to_install+=("fonts-wine")
-    fi
+    local apt_deps=(wine32:i386 wine64 libwine:i386 fonts-wine)
+    for ad in "${apt_deps[@]}"; do
+      if ! is_pkg_installed "apt" "${ad}"; then
+        # Avoid duplicates
+        [[ " ${to_install[*]} " =~ " ${ad} " ]] || to_install+=("${ad}")
+      fi
+    done
+  fi
+
+  # Check for wine-mono/gecko on Arch-based systems.
+  if [[ "${pkg_mgr}" == "pacman" ]]; then
+    for ap in wine-mono wine-gecko; do
+      if ! is_pkg_installed "pacman" "${ap}"; then
+        to_install+=("${ap}")
+      fi
+    done
   fi
 
   if [[ ${#to_install[@]} -eq 0 ]]; then
@@ -531,7 +559,7 @@ install_sys_deps() {
       sudo apt-get install -y -qq -o Dpkg::Progress-Fancy="1" "${to_install[@]}" >/dev/null 2>&1
       ;;
     pacman)
-      sudo pacman -Sy --noconfirm -q "${to_install[@]}" wine-mono wine-gecko >/dev/null 2>&1
+      sudo pacman -Sy --noconfirm -q "${to_install[@]}" >/dev/null 2>&1
       ;;
     dnf)
       sudo dnf install -y -q "${to_install[@]}" >/dev/null 2>&1
@@ -739,29 +767,24 @@ install_winetricks_multi() {
     local v="$1"
     case "${v}" in
       vcrun2010)
-        [[ -f "${sys64}/mfc100.dll" || -f "${syswow}/mfc100.dll" ]]
+        [[ -f "${sys64}/msvcr100.dll" || -f "${syswow}/msvcr100.dll" ]]
         ;;
       vcrun2012)
-        [[ -f "${sys64}/mfc110.dll" || -f "${syswow}/mfc110.dll" ]]
+        [[ -f "${sys64}/msvcr110.dll" || -f "${syswow}/msvcr110.dll" ]]
         ;;
       vcrun2019)
         # vcruntime140.dll is the canonical installed_file1 for vcrun2019.
-        # Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
-        #         w_metadata vcrun2019 installed_file1=vcruntime140.dll
         [[ -f "${sys64}/vcruntime140.dll" \
            || -f "${syswow}/vcruntime140.dll" ]]
         ;;
       dxvk)
-        # dxvk installs only 64-bit DLLs into system32 on a win64 prefix.
-        # Both d3d11.dll and dxgi.dll must be present — dxgi alone can come
-        # from Wine's built-in stub without a real DXVK install.
+        # Both d3d11.dll and dxgi.dll must be present.
         [[ -f "${sys64}/d3d11.dll" && -f "${sys64}/dxgi.dll" ]]
         ;;
       d3dx11_43)
         [[ -f "${sys64}/d3dx11_43.dll" || -f "${syswow}/d3dx11_43.dll" ]]
         ;;
       *)
-        # Unknown verb — no DLL heuristic available; defer to winetricks.log.
         return 1
         ;;
     esac
@@ -841,6 +864,8 @@ install_winetricks_multi() {
   log_before=$(mktemp /tmp/wt_log_before.XXXXXX)
   touch "${WINEPREFIX}/winetricks.log"
   cp "${WINEPREFIX}/winetricks.log" "${log_before}"
+  local lines_before
+  lines_before=$(wc -l < "${log_before}" 2>/dev/null || echo 0)
 
   (
     env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
@@ -862,9 +887,12 @@ install_winetricks_multi() {
     i=$(( (i+1) % 4 ))
     
     # Calculate progress based on how many new verbs appeared in the log.
-    completed=$(grep -Fxcf "${log_before}" "${WINEPREFIX}/winetricks.log" 2>/dev/null || echo 0)
-    # Clamp completed to total (grep might return more if log was modified externally).
+    local current_lines
+    current_lines=$(wc -l < "${WINEPREFIX}/winetricks.log" 2>/dev/null || echo 0)
+    completed=$(( current_lines - lines_before ))
+    # Clamp completed to total.
     (( completed > total )) && completed=${total}
+    (( completed < 0 )) && completed=0
     
     local percent=$(( completed * 100 / total ))
     local bar_len=30
