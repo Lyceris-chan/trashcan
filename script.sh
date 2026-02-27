@@ -12599,9 +12599,18 @@ XDLL_B64_EOF
 # Exit on error, undefined variable, or pipe failure.
 set -euo pipefail
 
-# Unset LD_LIBRARY_PATH to prevent system libraries from interfering with
-# Wine's own internal libraries.
-unset LD_LIBRARY_PATH
+# Set LD_LIBRARY_PATH to include Wine's internal libraries so it can find
+# essential DLLs like kernel32.dll even when run outside of Steam.
+# We prepend them to any existing LD_LIBRARY_PATH.
+_wine_bin_dir="$(dirname "${real_wine_path}")"
+_wine_root_dir="$(dirname "${_wine_bin_dir}")"
+if [[ "$(basename "${_wine_bin_dir}")" == "bin" ]]; then
+  # Standard layout: bin/ is next to lib64/ and lib/
+  export LD_LIBRARY_PATH="${_wine_root_dir}/lib64:${_wine_root_dir}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+elif [[ "$(basename "${_wine_bin_dir}")" == "files/bin" ]]; then
+  # Proton layout: files/bin/ is next to files/lib64/ and files/lib/
+  export LD_LIBRARY_PATH="${_wine_root_dir}/lib64:${_wine_root_dir}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
 export WINEPREFIX="${WINEPREFIX}"
 export WINEARCH="win64"
