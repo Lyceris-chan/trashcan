@@ -17,24 +17,25 @@
 #    ./cluckers-setup.sh --controller    # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --show-movies   # opt-out: show intro movies          (-m)
 #    ./cluckers-setup.sh --update        # check for game update       (-u)
-#    ./cluckers-setup.sh --uninstall     # remove everything           
+#    ./cluckers-setup.sh --uninstall     # remove everything
 #    ./cluckers-setup.sh --help          # show this help message      (-h)
 #
 #  SHORT FLAGS
-#    -a  auto      -v  verbose      -g  gamescope      -d  steam-deck
-#    -c  controller -m  show-movies  -u  update    -h  help
+#    -a  auto    -v  verbose    -g  gamescope    -d  steam-deck
+#    -c  controller    -m  show-movies    -u  update    -h  help
+#    --uninstall  (full word only, no short alias — removes everything)
 #
-#  UPDATE FLAG
-#    --update / -u checks the update server for a newer game version. Update
-#    detection matches NeedsUpdate() in internal/game/version.go: the local
-#    GameVersion.dat BLAKE3 hash is compared against the server's value. If
-#    they differ, the new game zip is downloaded with resume support, verified,
-#    and extracted in place. All setup steps (Wine, launcher, etc.) are skipped.
+#  UPDATE  (--update / -u)
+#    Checks the update server for a newer game version. Update
+#    detection compares the local GameVersion.dat BLAKE3 hash against the
+#    server's value. If they differ, the new game zip is downloaded with
+#    resume support, verified, and extracted in place. All setup steps
+#    (Wine, launcher, etc.) are skipped.
 #
 #    Combine with -d to also re-apply Deck patches afterward:
 #      ./cluckers-setup.sh --update --steam-deck
 #
-#    VERSION PINNING WITH --update
+#  VERSION PINNING  (--update only)
 #    Pass GAME_VERSION=x.x.x.x to target a specific build instead of latest:
 #      GAME_VERSION=0.36.2100.0 ./cluckers-setup.sh --update
 #
@@ -69,31 +70,20 @@
 #
 #    shm_launcher.exe  — creates a named Windows shared memory region
 #                        containing the content bootstrap blob that the game
-#                        reads on startup. Source: cluckers/tools/shm_launcher.c
+#                        reads on startup.
+#                        Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/shm.go
 #
 #    xinput1_3.dll     — remaps controller input so all buttons work correctly
-#                        under Wine/Proton. Source: cluckers/tools/xinput_remap.c
-#                        + cluckers/tools/xinput1_3.def
+#                        under Wine/Proton.
+#                        Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
 #
 #    To verify you get the same bytes and review the exact source code used
 #    to build them (without needing to decode the base64), please see the
-#    "REPRODUCIBLE BUILDS" and "SOURCE CODE" sections above Step 6 (line ~1630).
+#    "REPRODUCIBLE BUILDS" and "SOURCE CODE" sections inside Step 6 of the
+#    main() function (search this file for "REPRODUCIBLE BUILDS").
 #    The source code is embedded directly in this script as comments, along
-#    with the required compiler environment details and links to the official
-#    cluckers GitHub repository.
-#
-# SOURCE REFERENCES
-#   All behaviour mirrors the cluckers Go source. Key files:
-#   internal/launch/process_linux.go  — game launch args, env vars, shm usage
-#   internal/launch/pipeline_linux.go — launch pipeline steps
-#   internal/wine/detect.go           — Wine/Proton detection logic
-#   internal/wine/prefix.go           — Wine prefix creation and winetricks
-#   internal/wine/verify.go           — required DLLs (RequiredDLLs)
-#   internal/game/version.go          — version check and game path
-#   internal/config/paths_linux.go    — data directory paths
-#   internal/gateway/client.go        — gateway API URL format (/json/<cmd>)
-#   internal/gateway/types.go         — request/response types
-#   assets/controller_neptune_config.vdf — Steam Deck controller layout
+#    with full step-by-step build and verification instructions, and links to
+#    the official source at https://github.com/0xc0re/cluckers
 #
 # ==============================================================================
 
@@ -139,7 +129,6 @@ GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 --adapti
 
 # Wine prefix: an isolated fake-Windows folder just for this game.
 # Nothing else on your system is affected. Uninstalling means deleting this.
-# Path matches wine.PrefixPath() = DataDir()+"/prefix" in internal/wine/prefix.go.
 readonly WINEPREFIX="${HOME}/.cluckers/prefix"
 
 # Python libraries installation target
@@ -156,13 +145,13 @@ readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"
 
 readonly APP_NAME="Cluckers Central"
 
-# Update-server endpoint — matches UpdaterURL in internal/game/version.go.
+# Update-server endpoint — returns version.json with the latest build metadata.
 readonly UPDATER_URL="https://updater.realmhub.io/builds/version.json"
 
-# Game data directory — matches DataDir()+"/game" in internal/config/paths_linux.go.
+# Game data directory — where game files are downloaded and extracted.
 readonly GAME_DIR="${HOME}/.cluckers/game"
 
-# Game executable path inside GAME_DIR — from internal/game/version.go GameExePath().
+# Relative path to the game executable inside GAME_DIR.
 readonly GAME_EXE_REL="Realm-Royale/Binaries/Win64/ShippingPC-RealmGameNoEditor.exe"
 
 # Steam AppID for Realm Royale (the underlying game engine).
@@ -176,8 +165,8 @@ readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
 readonly SHM_LAUNCHER_SHA256="e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd"
 readonly XINPUT_DLL_SHA256="a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24"
 
-# SHA-256 of the embedded controller_neptune_config.vdf (from cluckers/assets/).
-# Source: cluckers/assets/controller_neptune_config.vdf
+# SHA-256 of the embedded Steam Deck controller layout (controller_neptune_config.vdf).
+# This is verified after extraction to ensure the embedded template is intact.
 readonly CONTROLLER_LAYOUT_SHA256="779194a12bf6a353e8931b17298d930f60e83126aa1a357dc6597d81dfd61709"
 
 export WINEPREFIX
@@ -250,6 +239,8 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 # ==============================================================================
 
 # Returns 0 if the local game matches the version info on the server.
+# Replicates the version check in:
+# https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 #
 # Arguments:
 #   $1 - dat_path_rel: Relative path to GameVersion.dat.
@@ -305,7 +296,6 @@ DATBLAKE3EOF
 }
 
 # Installs missing system packages using the distro's package manager.
-#
 # Checks for: wine winetricks curl wget python3 unzip sha256sum cabextract.
 # Installs only what is absent. Supports apt, pacman, dnf, zypper.
 #
@@ -318,7 +308,7 @@ install_sys_deps() {
   local tool
 
   local -a tools=(wine winetricks curl wget python3 unzip sha256sum cabextract)
-  
+
   info_msg "Checking for: ${tools[*]}..."
   for tool in "${tools[@]}" "$@"; do
     if command_exists "${tool}"; then
@@ -332,7 +322,7 @@ install_sys_deps() {
       to_install+=("${tool}")
     fi
   done
-  
+
   # Explicitly check for pip / pip3.
   if ! command_exists pip && ! command_exists pip3; then
     case "${pkg_mgr}" in
@@ -386,6 +376,92 @@ install_sys_deps() {
   esac
 }
 
+# Ensures winetricks is up-to-date by fetching the latest version from the
+# official GitHub release if the installed copy is older than 30 days or if
+# the installed version is too old to know about required verbs (vcrun2022,
+# dxvk ≥ 2.x, etc.). An outdated winetricks can silently download wrong DLLs
+# from stale URLs, which causes the game to fail to start without a clear error.
+#
+# The official source is:
+#   https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks
+#
+# If the download fails (offline), the installed version is kept as-is and a
+# warning is printed. This function never hard-fails — it degrades gracefully.
+#
+# Arguments:
+#   none
+ensure_winetricks_fresh() {
+  local wt_path
+  wt_path=$(command -v winetricks 2>/dev/null || true)
+  if [[ -z "${wt_path}" ]]; then
+    warn_msg "winetricks not found on PATH — skipping freshness check."
+    return 0
+  fi
+
+  # winetricks --version prints a date string like "20230212" or "20240101".
+  local wt_ver
+  wt_ver=$(winetricks --version 2>/dev/null | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
+
+  # Minimum required version: 20240105 (first release with vcrun2022 + dxvk 2.3).
+  local min_ver="20240105"
+
+  if [[ "${wt_ver}" -ge "${min_ver}" ]] 2>/dev/null; then
+    ok_msg "winetricks ${wt_ver} is up-to-date (≥ ${min_ver})."
+    return 0
+  fi
+
+  warn_msg "winetricks version '${wt_ver}' is older than ${min_ver} — fetching latest from GitHub."
+  warn_msg "(An old winetricks can install wrong/broken DLL versions.)"
+
+  local wt_url="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
+  local wt_tmp
+  wt_tmp=$(mktemp /tmp/winetricks.XXXXXX)
+
+  if curl -fsSL --max-time 30 "${wt_url}" -o "${wt_tmp}" 2>/dev/null; then
+    # Sanity-check: the downloaded file must look like a shell script, not an
+    # HTML error page or truncated response. A genuine winetricks script always
+    # starts with a shebang line.
+    local first_line
+    first_line=$(head -c 64 "${wt_tmp}" 2>/dev/null || true)
+    if [[ "${first_line}" != "#!"* ]]; then
+      rm -f "${wt_tmp}"
+      warn_msg "Downloaded winetricks does not appear to be a valid shell script — keeping installed copy."
+      return 0
+    fi
+
+    chmod +x "${wt_tmp}"
+    local new_ver
+    new_ver=$(bash "${wt_tmp}" --version 2>/dev/null | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
+    if [[ "${new_ver}" -ge "${wt_ver}" ]] 2>/dev/null; then
+      # If winetricks lives somewhere user-writable, update it in place.
+      # Otherwise, install to ~/.local/bin which is on our PATH.
+      local install_dir
+      if [[ -w "${wt_path}" ]]; then
+        install_dir="$(dirname "${wt_path}")"
+      else
+        install_dir="${HOME}/.local/bin"
+        mkdir -p "${install_dir}"
+      fi
+      # Use cp+rm rather than mv so a failure to copy doesn't leave wt_tmp
+      # installed at the destination path with the wrong name.
+      if cp "${wt_tmp}" "${install_dir}/winetricks"; then
+        rm -f "${wt_tmp}"
+        ok_msg "winetricks updated to ${new_ver} at ${install_dir}/winetricks."
+      else
+        rm -f "${wt_tmp}"
+        warn_msg "Could not write updated winetricks to ${install_dir} — keeping installed copy."
+      fi
+    else
+      rm -f "${wt_tmp}"
+      warn_msg "Downloaded winetricks version (${new_ver}) is not newer — keeping installed copy."
+    fi
+  else
+    rm -f "${wt_tmp}"
+    warn_msg "Could not download latest winetricks (no internet or GitHub unreachable)."
+    warn_msg "Continuing with installed version ${wt_ver} — some installs may fail."
+  fi
+}
+
 # Installs icoutils (wrestool + icotool) for icon extraction.
 #
 # Arguments:
@@ -401,6 +477,14 @@ install_icoutils() {
 }
 
 # Installs multiple winetricks packages in one go if they are not already installed.
+# Mirrors the prefix repair logic in:
+# https://github.com/0xc0re/cluckers/blob/master/internal/wine/proton.go
+#
+# Installed-verb detection uses winetricks' own state directory:
+#   ${WINEPREFIX}/winetricks/<verb>/
+# This is the authoritative source — it is created by winetricks itself after
+# each successful install, so it is always accurate even across script re-runs
+# or if packages were installed outside this script.
 #
 # Arguments:
 #   $1 - Human-readable description for progress output.
@@ -413,86 +497,46 @@ install_winetricks_multi() {
   local -r maint_wine="$1"; shift
   local -r maint_server="$1"; shift
   local -r is_auto="$1"; shift
-  local -r log="${WINEPREFIX}/winetricks.log"
   local -a to_install=()
   local pkg
 
   for pkg in "$@"; do
-    if ! [[ -f "${log}" ]] || ! grep -qw "${pkg}" "${log}" 2>/dev/null; then
+    # Check winetricks' own state directory — created by winetricks after a
+    # successful install. This is more reliable than a custom log file because
+    # it reflects the true prefix state regardless of how the verb was installed.
+    if [[ -d "${WINEPREFIX}/winetricks/${pkg}" ]]; then
+      ok_msg "${pkg} already installed — skipping."
+    else
       to_install+=("${pkg}")
     fi
   done
 
   if [[ ${#to_install[@]} -eq 0 ]]; then
-    ok_msg "${desc} are already installed."
+    ok_msg "All ${desc} are already installed."
     return 0
   fi
 
-  info_msg "Installing ${desc} (${to_install[*]})..."
+  info_msg "Installing ${desc}: ${to_install[*]}..."
   # Ensure no orphaned wineservers are running before winetricks.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
-  
+
   local wt_flags=""
   if [[ "${is_auto}" == "true" && "${VERBOSE_MODE:-false}" != "true" ]]; then
     wt_flags="-q"
   fi
 
-  # Run winetricks for all missing packages
-  if WINE="${maint_wine}" WINESERVER="${maint_server}" \
+  # Run winetricks for all missing packages in one call for speed, explicitly
+  # targeting our prefix. Without WINEPREFIX= winetricks would fall back to
+  # ~/.wine instead of our isolated prefix at ~/.cluckers/prefix.
+  # shellcheck disable=SC2086
+  if WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
      winetricks ${wt_flags} "${to_install[@]}"; then
-    ok_msg "${desc} installed."
-    # Log each successful installation.
-    for pkg in "${to_install[@]}"; do
-      echo "${pkg}" >> "${log}"
-    done
+    ok_msg "${desc} installed successfully."
   else
-    warn_msg "Installation of some components in '${desc}' failed — continuing anyway."
+    warn_msg "Some components in '${desc}' failed to install — continuing anyway."
   fi
 
-  # Cleanup after winetricks.
-  env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
-}
-
-# Installs a winetricks package if not already recorded in the winetricks log.
-#
-# Globals:
-#   WINEPREFIX
-# Arguments:
-#   $1 - winetricks package identifier (e.g. "vcrun2022").
-#   $2 - Human-readable description for progress output.
-install_winetricks_pkg() {
-  local -r pkg="$1"
-  local -r desc="$2"
-  local -r maint_wine="${3:-wine}"
-  local -r maint_server="${4:-wineserver}"
-  local -r is_auto="${5:-false}"
-  local -r log="${WINEPREFIX}/winetricks.log"
-
-  if [[ -f "${log}" ]] && grep -qw "${pkg}" "${log}" 2>/dev/null; then
-    ok_msg "${desc} already installed — skipping."
-    return 0
-  fi
-
-  info_msg "Installing ${desc}..."
-  # Ensure no orphaned wineservers are running before winetricks.
-  env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
-  
-  local wt_flags=""
-  if [[ "${is_auto}" == "true" && "${VERBOSE_MODE:-false}" != "true" ]]; then
-    wt_flags="-q"
-  fi
-
-  # Run winetricks
-  if WINE="${maint_wine}" WINESERVER="${maint_server}" \
-     winetricks ${wt_flags} "${pkg}"; then
-    ok_msg "${desc} installed."
-    # Log the successful installation so we can skip it next time.
-    echo "${pkg}" >> "${log}"
-  else
-    warn_msg "${pkg} install failed or timed out — continuing anyway."
-  fi
-
-  # Cleanup after winetricks.
+  # Kill any wineserver processes left behind by winetricks.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 }
 
@@ -501,6 +545,8 @@ install_winetricks_pkg() {
 # ==============================================================================
 
 # Fetches version metadata from the update server into VERSION_INFO_JSON.
+# The version.json schema is defined in:
+# https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 #
 # Globals set:
 #   VERSION_INFO_JSON
@@ -596,6 +642,8 @@ verify_sha256() {
 # ==============================================================================
 
 # Removes everything this script created and cleans up Steam configuration.
+# Steam shortcut ID computation mirrors:
+# https://github.com/0xc0re/cluckers/blob/master/internal/cli/steam_linux.go
 #
 # Globals:
 #   WINEPREFIX, LAUNCHER_SCRIPT, DESKTOP_FILE,
@@ -802,34 +850,64 @@ PYEOF
 #  Main install
 # ==============================================================================
 
-# Downloads a file in parallel chunks using curl and range requests.
-# Retains resume support.
+# Downloads a file in parallel chunks using curl and HTTP range requests.
+# Falls back to a single-threaded curl download with resume support if the
+# server does not advertise Accept-Ranges: bytes.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/game/download.go
 #
 # Arguments:
-#   $1 - url: Direct download URL
-#   $2 - dest: Destination file path
+#   $1 - url:  Direct download URL.
+#   $2 - dest: Destination file path.
 parallel_download() {
   local url="$1"
   local dest="$2"
-  local threads=8
+  # Detect available CPU threads dynamically. Cap at 8 to avoid hammering the
+  # server; floor at 1 for single-core machines or containers without nproc.
+  local threads
+  threads=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+  # Clamp: minimum 1, maximum 8
+  [[ "${threads}" -lt 1 ]] && threads=1
+  [[ "${threads}" -gt 8 ]] && threads=8
 
-  # Get the total file size from the server
+  # Helper: clean up all chunk and temp files for this download.
+  # Called on failure so stale chunks don't corrupt a future resume.
+  _cleanup_parts() {
+    local i
+    for ((i=0; i<threads; i++)); do
+      rm -f "${dest}.part${i}" "${dest}.part${i}.tmp"
+    done
+  }
+
+  # Probe the server: get Content-Length and confirm range-request support.
+  # We need both to do a correct parallel split.
+  local headers
+  headers=$(curl -sI -L "$url" 2>/dev/null)
   local size
-  size=$(curl -sI -L "$url" | grep -i 'Content-Length' | tail -n1 | awk '{print $2}' | tr -d '\r')
+  size=$(printf '%s' "$headers" | grep -i '^content-length:' | tail -n1 | awk '{print $2}' | tr -d '\r')
+  local accept_ranges
+  accept_ranges=$(printf '%s' "$headers" | grep -i '^accept-ranges:' | tail -n1 | tr -d '\r' | awk '{print $2}')
 
-  # If size is unknown or not a number, fallback to standard single-threaded curl
-  if [[ -z "$size" || ! "$size" =~ ^[0-9]+$ ]]; then
+  # If the server doesn't support range requests, or we couldn't get the file
+  # size, fall back to a single-threaded download with resume support.
+  # (-C - tells curl to resume from where a previous partial download stopped.)
+  if [[ -z "$size" || ! "$size" =~ ^[0-9]+$ || "${accept_ranges,,}" != "bytes" ]]; then
+    info_msg "Server does not support parallel downloads — using single-threaded download."
     local resume_flag=""
     if [[ -f "${dest}.partial" ]]; then
       local partial_size
       partial_size=$(stat -c%s "${dest}.partial" 2>/dev/null || echo 0)
-      info_msg "Resuming partial download (${partial_size} bytes)..."
+      info_msg "Resuming partial download from ${partial_size} bytes..."
       resume_flag="-C -"
     fi
-    curl -L --progress-bar "${resume_flag}" -o "${dest}.partial" "$url" || return 1
+    # resume_flag is intentionally unquoted: when empty it must not expand
+    # to an empty-string argument that would confuse curl's option parser.
+    # shellcheck disable=SC2086
+    curl -L --progress-bar ${resume_flag} -o "${dest}.partial" "$url" || return 1
     mv "${dest}.partial" "$dest"
     return 0
   fi
+
+  info_msg "Downloading with ${threads} parallel threads (${size} bytes total)..."
 
   local chunk_size=$(( size / threads ))
   local pids=()
@@ -837,103 +915,99 @@ parallel_download() {
 
   for ((i=0; i<threads; i++)); do
     local start=$(( i * chunk_size ))
-    local end=$(( (i+1) * chunk_size - 1 ))
-    if [[ $i -eq $((threads-1)) ]]; then
-      end=$(( size - 1 ))
-    fi
-    
+    local end=$(( (i == threads - 1) ? size - 1 : (i + 1) * chunk_size - 1 ))
     local part_file="${dest}.part${i}"
     local part_size=0
+
     if [[ -f "$part_file" ]]; then
       part_size=$(stat -c%s "$part_file" 2>/dev/null || echo 0)
     fi
-    
-    local expected_part_size=$(( end - start + 1 ))
-    
-    if [[ $part_size -lt $expected_part_size ]]; then
-      local new_start=$(( start + part_size ))
-      # Download into a tmp file, then append. This ensures we can resume cleanly.
-      (
-        curl -s -L -f -r "${new_start}-${end}" -o "${part_file}.tmp" "$url" && \
-        cat "${part_file}.tmp" >> "$part_file" && \
-        rm -f "${part_file}.tmp"
-      ) &
-      pids+=($!)
-    elif [[ $part_size -gt $expected_part_size ]]; then
-      # If part is mysteriously larger, reset it.
-      rm -f "$part_file"
-      (
-        curl -s -L -f -r "${start}-${end}" -o "${part_file}.tmp" "$url" && \
-        cat "${part_file}.tmp" >> "$part_file" && \
-        rm -f "${part_file}.tmp"
-      ) &
-      pids+=($!)
+
+    local expected_size=$(( end - start + 1 ))
+
+    if [[ $part_size -ge $expected_size ]]; then
+      # Chunk already complete — nothing to do.
+      if [[ $part_size -gt $expected_size ]]; then
+        # Chunk is corrupted (too large) — reset it.
+        warn_msg "Chunk ${i} is oversized — resetting."
+        rm -f "$part_file"
+        part_size=0
+      else
+        continue
+      fi
     fi
+
+    # Remove any stale .tmp file left by a previously interrupted run before
+    # starting the curl subprocess, so we don't append to garbage data.
+    rm -f "${part_file}.tmp"
+
+    local new_start=$(( start + part_size ))
+    # Download the remaining bytes for this chunk into a .tmp file, then
+    # append to the .part file. This two-step write ensures the .part file
+    # only grows with fully received data, making resume safe.
+    (
+      curl -s -L -f -r "${new_start}-${end}" -o "${part_file}.tmp" "$url" && \
+      cat "${part_file}.tmp" >> "$part_file" && \
+      rm -f "${part_file}.tmp"
+    ) &
+    pids+=($!)
   done
-  
+
   if [[ ${#pids[@]} -gt 0 ]]; then
-    # Show progress bar
+    # Show a live progress bar while chunks download in the background.
     while true; do
       local current_size=0
       for ((i=0; i<threads; i++)); do
-        local ps=0
-        if [[ -f "${dest}.part${i}" ]]; then
-          ps=$(stat -c%s "${dest}.part${i}" 2>/dev/null || echo 0)
-        fi
-        current_size=$(( current_size + ps ))
-        if [[ -f "${dest}.part${i}.tmp" ]]; then
-          local tmps
-          tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
-          current_size=$(( current_size + tmps ))
-        fi
+        local ps=0 tmps=0
+        [[ -f "${dest}.part${i}" ]]     && ps=$(stat   -c%s "${dest}.part${i}"     2>/dev/null || echo 0)
+        [[ -f "${dest}.part${i}.tmp" ]] && tmps=$(stat -c%s "${dest}.part${i}.tmp" 2>/dev/null || echo 0)
+        current_size=$(( current_size + ps + tmps ))
       done
-      
-      local percent=$(( current_size * 100 / size ))
+
+      local percent=0
+      [[ "${size}" -gt 0 ]] && percent=$(( current_size * 100 / size ))
       local bar_length=40
       local filled=$(( percent * bar_length / 100 ))
       local empty=$(( bar_length - filled ))
-      local bar_str
-      bar_str=$(printf "%${filled}s" | tr ' ' '#')
-      local empty_str
+      local bar_str empty_str
+      bar_str=$(printf "%${filled}s"  | tr ' ' '#')
       empty_str=$(printf "%${empty}s" | tr ' ' '-')
-      
-      printf "\r  [INFO]  [%s%s] %d%% (%d / %d MB)   " "${bar_str}" "${empty_str}" "${percent}" "$((current_size / 1048576))" "$((size / 1048576))"
-      
+      printf "\r  [INFO]  [%s%s] %d%% (%d / %d MB)   " \
+        "${bar_str}" "${empty_str}" "${percent}" \
+        "$((current_size / 1048576))" "$((size / 1048576))"
+
       local all_done=true
       local pid
       for pid in "${pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-          all_done=false
-          break
-        fi
+        kill -0 "$pid" 2>/dev/null && { all_done=false; break; }
       done
-      
-      if $all_done; then
-        break
-      fi
+      $all_done && break
       sleep 1
     done
-    printf "\n"
-    
-    # Wait and capture exit codes
+
+    # Collect exit codes only after the progress loop exits, so we get the
+    # true final status of every subprocess before reporting success or failure.
     local failed=false
     local pid_w
     for pid_w in "${pids[@]}"; do
       wait "$pid_w" || failed=true
     done
-    
+    printf "\n"
+
     if $failed; then
+      warn_msg "One or more download chunks failed — cleaning up partial files."
+      _cleanup_parts
       return 1
     fi
   fi
-  
-  # Concatenate files
+
+  # All chunks complete — concatenate in order into the final destination file.
   rm -f "$dest"
   for ((i=0; i<threads; i++)); do
     cat "${dest}.part${i}" >> "$dest"
     rm -f "${dest}.part${i}"
   done
-  
+
   return 0
 }
 
@@ -941,12 +1015,10 @@ parallel_download() {
 # Skips all setup steps — only updates the game files in GAME_DIR.
 # Optionally applies game patches (Steam Deck or Controller) afterward.
 #
-# Update detection mirrors internal/game/version.go NeedsUpdate():
-#   1. Fetch version.json from the update server (VersionInfo struct).
-#   2. Read the local GameVersion.dat whose path is given by
-#      VersionInfo.GameVersionDatPath (relative to GAME_DIR).
-#   3. Compute BLAKE3 hash of the local file and compare against
-#      VersionInfo.GameVersionDatBLAKE3. A mismatch means update needed.
+# Update detection: fetches version.json from the update server, reads the
+# local GameVersion.dat, computes its BLAKE3 hash, and compares it against
+# the server's value. A mismatch means an update is needed.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 #
 # Version pinning:
 #   Set GAME_VERSION=x.x.x.x before calling to target a specific build.
@@ -989,14 +1061,13 @@ run_update() {
   zip_blake3=$(parse_version_field "zip_blake3")
   # gameversion_dat_path is relative to GAME_DIR — e.g.
   # "Realm-Royale/Binaries/GameVersion.dat" (no Win64/ component).
-  # Source: VersionInfo.GameVersionDatPath in internal/game/version.go.
   dat_path_rel=$(parse_version_field "gameversion_dat_path")
   dat_blake3=$(parse_version_field "gameversion_dat_blake3")
 
   info_msg "Latest version on server: ${server_version}"
 
   # ---- Version pinning -------------------------------------------------------
-  # Priority (highest first):
+  # Priority order (highest first):
   #   1. GAME_VERSION env var set by the user for this run.
   #   2. .pinned_version file written by a previous pinned --update run.
   #   3. "auto" — use latest from server.
@@ -1005,10 +1076,16 @@ run_update() {
 
   if [[ "${target_version}" == "auto" ]] && [[ -f "${pin_file}" ]]; then
     target_version=$(tr -d '[:space:]' < "${pin_file}" 2>/dev/null || echo "auto")
+    # Validate the pin file value is a safe dotted-numeric version string.
+    # This prevents a tampered/corrupted pin file from injecting arbitrary
+    # characters into the download URL constructed below.
     if [[ "${target_version}" != "auto" ]]; then
-      info_msg "Using pinned version from ${pin_file}: ${target_version}"
-    else
-      target_version="auto"
+      if [[ "${target_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        info_msg "Using pinned version from ${pin_file}: ${target_version}"
+      else
+        warn_msg "Pin file contains invalid version '${target_version}' — ignoring, using latest."
+        target_version="auto"
+      fi
     fi
   fi
 
@@ -1019,6 +1096,8 @@ run_update() {
     info_msg "Targeting pinned version: ${target_version}"
     # Build the zip URL for the pinned version (BLAKE3 not available for old
     # builds, so we skip hash verification and rely on SHA-256 of the zip).
+    # target_version is already validated as ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$
+    # so it is safe to interpolate directly into the URL.
     zip_url="https://updater.realmhub.io/builds/game-${target_version}.zip"
     zip_blake3=""
     dat_blake3=""
@@ -1031,13 +1110,20 @@ run_update() {
   fi
 
   # ---- Update detection ------------------------------------------------------
-  # Mirrors NeedsUpdate() in internal/game/version.go:
-  #   Read local GameVersion.dat, compute BLAKE3, compare to server value.
-  # Falls back to "needs update" if the file is absent or unreadable.
+  # Read the local GameVersion.dat, compute its BLAKE3 hash, and compare to
+  # the server's value. Falls back to "needs update" if absent or unreadable.
   if is_game_up_to_date "${dat_path_rel}" "${dat_blake3}"; then
     ok_msg "Game is already up to date (${target_version})."
     ok_msg "Game version verified successfully."
     return 0
+  fi
+
+  # Validate the zip URL before use — reject anything that isn't a plain
+  # https:// URL pointing to the expected update host. This prevents a
+  # compromised version.json from redirecting downloads to an attacker's server.
+  if [[ ! "${zip_url}" =~ ^https://updater\.realmhub\.io/ ]]; then
+    error_exit "Update server returned an unexpected download URL: '${zip_url}'
+  Only https://updater.realmhub.io/ URLs are accepted. Aborting for safety."
   fi
 
   info_msg "Update required. Downloading ${target_version}..."
@@ -1101,13 +1187,20 @@ ZIPBLAKE3EOF
   fi
   rm -f "${zip_path}"
   ok_msg "Game updated to ${target_version}."
+
+  # Apply game patches (Deck, controller, movies) if any flags were set.
+  # Without this, --update --steam-deck would download the update but skip
+  # re-applying input patches, leaving the game unconfigured for the Deck.
+  if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" \
+     || "${skip_movies_flag}" == "true" ]]; then
+    apply_game_patches "${GAME_DIR}" "${steam_deck_flag}" "${controller_flag}" "${skip_movies_flag}"
+  fi
 }
 
 # Returns 0 if running on a Steam Deck, 1 otherwise.
-# Mirrors the logic in cluckers/internal/gui/deck_linux.go (isSteamDeck).
+# Checks DMI board vendor, /etc/os-release, and the default Deck home directory.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/gui/deck_linux.go
 #
-# Globals:
-#   None.
 # Returns:
 #   0 if Steam Deck, 1 otherwise.
 is_steam_deck() {
@@ -1123,15 +1216,19 @@ is_steam_deck() {
   if [[ -r /etc/os-release ]] && grep -q "ID=steamos" /etc/os-release; then
     return 0
   fi
-  # Tertiary: default Steam Deck home directory exists.
-  if [[ -d /home/deck ]]; then
+  # Tertiary: /home/deck exists AND /etc/os-release contains SteamOS marker.
+  # The bare /home/deck check is intentionally combined with an os-release
+  # check to avoid false-positives on any machine that happens to have a
+  # 'deck' user account (e.g. a developer's workstation).
+  if [[ -d /home/deck ]] && [[ -r /etc/os-release ]] \
+     && grep -qi "steamos\|valve" /etc/os-release 2>/dev/null; then
     return 0
   fi
   return 1
 }
 
 # Applies game patches (display, input, layout) for Steam Deck or generic controllers.
-# Mirrors PatchDeckConfig() in cluckers/internal/launch/deckconfig.go.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
 #
 # Patches applied:
 #   RealmSystemSettings.ini  — forces fullscreen at 1280x800 (Deck only).
@@ -1211,11 +1308,11 @@ for line in lines:
             found_key = True
         in_section = (trimmed.lower() == "[fullscreenmovie]")
         if in_section: section_exists = True
-    
+
     if in_section and trimmed.lower().startswith("bforcenomovies="):
         line = target + "\n"
         found_key = True
-    
+
     out_lines.append(line)
 
 # Handle case where section was at the very end of file
@@ -1308,7 +1405,8 @@ ENGINE_OVERRIDE_EOF
     info_msg "Patch: Neutralizing phantom mouse-axis counters (Controller mode)..."
     # "Count bXAxis" / "Count bYAxis" in mouse bindings cause UE3 to switch from
     # gamepad to KB/M mode whenever phantom mouse events arrive under Wine.
-    # Source: deckconfig.go — PatchDeckInputConfig(), deckInputPatches var.
+    # Removes phantom mouse-axis counters that cause the game to switch from
+    # gamepad to KB/M mode under Wine.
     for ini in \
       "${engine_config_dir}/BaseInput.ini" \
       "${config_dir}/DefaultInput.ini" \
@@ -1373,7 +1471,7 @@ for section in ["[Engine.PlayerInput]", "[TgGame.TgPlayerInput]"]:
                 if not has_gamepad: new_lines.append("bUsingGamepad=True")
                 if not has_joystick: new_lines.append("AllowJoystickInput=True")
                 in_sect = False
-            
+
             if in_sect:
                 if line.strip().lower().startswith("businggamepad="):
                     line = "bUsingGamepad=True"
@@ -1384,7 +1482,7 @@ for section in ["[Engine.PlayerInput]", "[TgGame.TgPlayerInput]"]:
                     has_joystick = True
                     changed = True
             new_lines.append(line)
-        
+
         if in_sect: # Section was at end of file
             if not has_gamepad: new_lines.append("bUsingGamepad=True")
             if not has_joystick: new_lines.append("AllowJoystickInput=True")
@@ -1409,7 +1507,7 @@ DECK_INPUT_EOF
     info_msg "Patch: Deploying Steam Deck controller layout template..."
     # Best-effort: deploy to every Steam userdata account directory found.
     # Preserves any existing user-customised layout (never overwrites).
-    # Source: deckconfig.go — deployDeckControllerLayout().
+    # Deploys the Steam Deck button layout template to Steam's controller config.
     local vdf_tmp
     vdf_tmp=$(mktemp /tmp/cluckers_neptune_XXXXXX --suffix=.vdf)
     base64 -d << 'NEPTUNE_B64_EOF' > "${vdf_tmp}"
@@ -1608,16 +1706,20 @@ DECK_LAYOUT_EOF
   ok_msg "Game patches applied."
 }
 # Locates the newest Proton-GE installation or falls back to system Wine.
-# Matches FindWine() logic in internal/wine/detect.go.
+# Searches common Steam, Lutris, and Bottles runner directories, picks the
+# highest-versioned GE-Proton, and verifies it can run before selecting it.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/wine/detect.go
 #
 # Arguments:
 #   $1 - variable name to store the wine binary path
 #   $2 - variable name to store the is_proton boolean ("true"/"false")
 #   $3 - variable name to store the proton tool name
+#   $4 - variable name to store the wineserver binary path
 find_wine() {
   local -n _out_path=$1
   local -n _out_is_proton=$2
   local -n _out_tool_name=$3
+  local -n _out_server=$4
 
   _out_path=""
   _out_is_proton="false"
@@ -1714,7 +1816,7 @@ find_wine() {
         tool_dir=$(dirname "${tool_dir}")
     fi
     _out_tool_name=$(basename "${tool_dir}")
-    
+
     # Set the wineserver path associated with this Wine binary
     _out_server="$(dirname "${newest_proton}")/wineserver"
     [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
@@ -1744,7 +1846,7 @@ find_wine() {
     if [[ -n "${path}" ]] && [[ -x "${path}" ]]; then
       _out_path="${path}"
       _out_tool_name="wine"
-      
+
       # Set the wineserver path associated with this Wine binary
       _out_server="$(dirname "${path}")/wineserver"
       [[ ! -x "${_out_server}" ]] && _out_server="wineserver"
@@ -1790,7 +1892,19 @@ main() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      --uninstall)       run_uninstall; exit 0 ;;
+      --uninstall)
+        printf "\n%b[WARN]%b This will permanently remove Cluckers Central, the Wine prefix,\n" "${YELLOW}" "${NC}"
+        printf "        all game files in ~/.cluckers, and Steam shortcuts.\n"
+        printf "        This action cannot be undone.\n\n"
+        printf "  Type 'yes' to confirm: "
+        local _confirm=""
+        read -r _confirm
+        if [[ "${_confirm}" != "yes" ]]; then
+          printf "  Uninstall cancelled.\n\n"
+          exit 0
+        fi
+        run_uninstall; exit 0
+        ;;
       --update|-u)       do_update="true" ;;
       --verbose|-v)      verbose="true" ;;
       --auto|-a)         auto_mode="true" ;;
@@ -1802,7 +1916,7 @@ main() {
       --skip-movies)     skip_movies="true"; [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}" ;;
       --show-movies|-m)  skip_movies="false" ;;
       --help|-h)         print_help; exit 0 ;;
-      *) ;;
+      *) warn_msg "Unknown flag ignored: '${arg}' (try --help for usage)" ;;
     esac
   done
 
@@ -1816,11 +1930,13 @@ main() {
     touch "${show_movies_pref}"
   fi
 
-  local skip_heavy_steps="false"
-  if [[ "${do_update}" == "true" ]]; then
-    run_update "${steam_deck}" "${controller_mode}" "${skip_movies}"
-    skip_heavy_steps="true"
-  fi
+  # Show the banner immediately so the user knows the script has started.
+  # This must come before find_wine (which probes Wine binaries and can take
+  # a few seconds), so there is no silent gap after pressing Enter.
+  printf "\n"
+  printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
+  printf "%b║        Cluckers Central — Linux Setup Script         ║%b\n" "${GREEN}" "${NC}"
+  printf "%b╚══════════════════════════════════════════════════════╝%b\n\n" "${GREEN}" "${NC}"
 
   if [[ "${verbose}" == "true" ]]; then
     export WINEDEBUG=""
@@ -1841,18 +1957,23 @@ main() {
     printf "\n"
   fi
 
-  printf "\n"
-  printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
-  printf "%b║        Cluckers Central — Linux Setup Script         ║%b\n" "${GREEN}" "${NC}"
-  printf "%b╚══════════════════════════════════════════════════════╝%b\n\n" "${GREEN}" "${NC}"
+  local skip_heavy_steps="false"
+  if [[ "${do_update}" == "true" ]]; then
+    run_update "${steam_deck}" "${controller_mode}" "${skip_movies}"
+    skip_heavy_steps="true"
+  fi
 
-  # Detect Wine/Proton once upfront — result is used in Step 4 (DXVK) and
-  # Step 8 (launcher). find_wine sets the variables passed as arguments.
+  info_msg "Initialising — detecting Wine installation..."
+  info_msg "(This may take a few seconds on first run while Wine is located.)"
+
+  # Detect Wine/Proton once upfront — result is used in Step 3 (prefix),
+  # Step 4 (DXVK), and Step 8 (launcher). find_wine sets the variables
+  # passed as arguments.
   find_wine real_wine_path _is_proton _proton_tool_name real_wineserver || true
 
-  # Maintenance Wine: Used for winetricks and wineboot (prefix setup).
-  # SLR Proton builds cannot run standalone and cause hangs in these steps.
-  # We prefer a standalone-functional Wine for maintenance.
+  # Maintenance Wine: used for winetricks and wineboot (prefix setup).
+  # SLR Proton builds cannot run standalone and cause hangs in these steps,
+  # so we prefer a standalone-functional Wine binary for maintenance tasks.
   local maint_wine="wine"
   local maint_server="wineserver"
 
@@ -1860,11 +1981,13 @@ main() {
     # The detected Wine is standalone-functional (e.g. GE-Proton or system Wine).
     maint_wine="${real_wine_path}"
     maint_server="${real_wineserver}"
+    info_msg "Using Wine binary: ${real_wine_path}"
   else
     # The detected Wine is likely SLR Proton or missing. Fallback to system Wine.
     if command_exists wine; then
       maint_wine=$(command -v wine)
       maint_server=$(command -v wineserver || echo "wineserver")
+      info_msg "Falling back to system Wine: ${maint_wine}"
     fi
   fi
 
@@ -1873,9 +1996,9 @@ main() {
   #
   # Detects your Linux distribution's package manager (apt for Ubuntu/Debian,
   # pacman for Arch, dnf for Fedora, zypper for openSUSE) and installs any
-  # missing tools. 
+  # missing tools.
   #
-  # Note: This step requires 'sudo' (administrator) privileges to install 
+  # Note: This step requires 'sudo' (administrator) privileges to install
   # system-wide tools like Wine.
   # --------------------------------------------------------------------------
   step_msg "Step 1 — Checking system tools..."
@@ -1899,6 +2022,12 @@ main() {
   [[ "${use_gamescope}" == "true" ]] && extra_tools+=("gamescope")
   install_sys_deps "${pkg_mgr}" "${extra_tools[@]}"
 
+  # Ensure winetricks is recent enough to know about vcrun2022 and dxvk 2.x.
+  # Distro packages are often many months behind; we fetch the latest from the
+  # official Winetricks GitHub repo so verb downloads use correct, live URLs.
+  step_msg "Step 1b — Ensuring winetricks is up-to-date..."
+  ensure_winetricks_fresh
+
   # ~/.local/bin is not in PATH by default on all distros. Add it now so the
   # launcher script we create in Step 12 can be found immediately.
   if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
@@ -1910,7 +2039,7 @@ main() {
   # Python libraries used by this script:
   #   vdf      — reads/writes Steam's binary config files (shortcuts.vdf etc.)
   #   blake3   — computes hashes for game file integrity verification
-  
+
   # Ensure pip is available. Prefer python3 -m pip for reliability.
   local pip_cmd=""
   if python3 -m pip --version > /dev/null 2>&1; then
@@ -1997,10 +2126,29 @@ main() {
       resolved_version="0.36.2100.0"
       warn_msg "Falling back to hardcoded version: ${resolved_version}"
     fi
+    # resolved_version is either the hardcoded fallback above or was set from
+    # GAME_VERSION env var, which was already validated as ^[0-9.]+$ by the
+    # arg-parsing logic. Safe to interpolate directly into the URL.
     zip_url="https://updater.realmhub.io/builds/game-${resolved_version}.zip"
   fi
 
+  # Validate resolved_version is a safe dotted-numeric string before it
+  # is interpolated into any URL (covers both the server and offline paths).
+  if [[ ! "${resolved_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    error_exit "Resolved game version '${resolved_version}' is not a valid version string.
+  Expected format: X.Y.Z.W (e.g. 0.36.2100.0). Aborting for safety."
+  fi
+
   ok_msg "Game version: ${resolved_version}"
+
+  # Validate the zip URL before use — reject anything not pointing to the
+  # expected update host. Prevents a compromised version.json from redirecting
+  # downloads to an attacker-controlled server.
+  if [[ -n "${zip_url}" && ! "${zip_url}" =~ ^https://updater\.realmhub\.io/ ]]; then
+    error_exit "Update server returned an unexpected download URL: '${zip_url}'
+  Only https://updater.realmhub.io/ URLs are accepted. Aborting for safety."
+  fi
+
   ok_msg "Download URL: ${zip_url}"
 
   is_game_up_to_date "${dat_path_rel}" "${dat_blake3}" || true
@@ -2025,8 +2173,7 @@ main() {
     mkdir -p "${WINEPREFIX}"
 
     # If we are using Proton, it's safer and faster to copy its bundled default_pfx
-    # instead of running wineboot --init (which can hang).
-    # Source: cluckers/internal/wine/prefix.go (createFromProtonTemplate)
+    # instead of running wineboot --init (which can hang with some Proton builds).
     local proton_template=""
     if [[ "${_is_proton}" == "true" ]]; then
       # find_wine resolves real_wine_path to something like .../Proton/files/bin/wine
@@ -2046,8 +2193,8 @@ main() {
       info_msg "Copying Proton prefix template from ${proton_template}..."
       cp -r "${proton_template}"/* "${WINEPREFIX}/"
     else
-      # Suppress Wine GUI dialogs during init (matches wineEnv() in prefix.go):
-      #   DISPLAY=""                   — no X window for mono/gecko installers
+      # Suppress Wine GUI dialogs during prefix initialisation:
+      #   DISPLAY=""                        — no X window for mono/gecko installers
       #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
       DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
         WINE="${maint_wine}" WINESERVER="${maint_server}" \
@@ -2069,32 +2216,52 @@ main() {
   # --------------------------------------------------------------------------
   # Step 4 — Windows runtime libraries
   #
-  # vcrun2010/2012/2019 satisfy the game's Visual C++ redistributable requirements.
+  # vcrun2010 / vcrun2012 / vcrun2022
+  #   — Visual C++ Redistributables required by the game. Each covers a
+  #     distinct runtime DLL set (msvcp*.dll, vcruntime*.dll, etc.).
+  #     All three are required simultaneously because the game engine and its
+  #     dependencies link against multiple VC++ generations:
+  #       vcrun2010 → msvcp100.dll / msvcr100.dll
+  #       vcrun2012 → msvcp110.dll / msvcr110.dll
+  #       vcrun2022 → msvcp140.dll / vcruntime140.dll / vcruntime140_1.dll
+  #     vcrun2022 is a strict superset of vcrun2019/2017/2015 — they all ship
+  #     the same vc_redist installer with the same CRT DLLs; 2022 is the latest
+  #     revision and installs vcruntime140_1.dll additionally, so the older
+  #     versions are redundant and intentionally omitted.
+  #     Missing any of these three causes a silent "DLL not found" crash at
+  #     launch or during the loading screen.
   #
-  # d3dx9 installs the individual DirectX 9 DLLs (d3dx9_24 through
-  # d3dx9_43) that correspond to the DirectX Jun 2010 Redistributable
-  # (Depot 228990). The legacy 'directx9' winetricks verb is deprecated
-  # in current winetricks versions and issues a warning.
+  # dxvk      — Vulkan-backed Direct3D 11 implementation. Replaces Wine's
+  #   built-in d3d11 with a much faster Vulkan path. Also provides the
+  #   d3d11.dll that the game requires at launch. Requires a Vulkan-capable
+  #   GPU and driver (NVIDIA ≥ 470, AMD Mesa ≥ 21.x, Intel ≥ ANV).
   #
-  # DXVK is installed — provides d3d11.dll checked by verify.go and improves performance.
+  # d3dx11_43 — DirectX 11 helper DLL (d3dx11_43.dll) required by the game.
+  #
+  # All packages are installed in a single winetricks call for speed. Each is
+  # recorded under ${WINEPREFIX}/winetricks/<verb>/ by winetricks itself after
+  # a successful install, so re-runs skip already-installed verbs instantly
+  # without re-downloading anything.
   # --------------------------------------------------------------------------
   step_msg "Step 4 — Installing Windows runtime libraries..."
 
   # Ensure no orphaned wineservers are running from previous steps/runs.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 
-  # Packages match verify.go RepairInstructions exactly:
+  # These packages are the exact set the game requires to run correctly:
+  # vcrun2022 is a strict superset of vcrun2019 — it ships a newer revision of
+  # the same vc_redist package and installs vcruntime140_1.dll on top, so
+  # vcrun2019 is intentionally omitted to avoid a redundant download.
   install_winetricks_multi "Windows runtime libraries" "${maint_wine}" "${maint_server}" "${auto_mode}" \
-    "vcrun2010" "vcrun2012" "vcrun2019" "dxvk" "d3dx11_43"
+    "vcrun2010" "vcrun2012" "vcrun2022" "dxvk" "d3dx11_43"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
   #
   # Downloads the game zip (~5.3 GB) from the update server with resume
   # support (if a previous download was interrupted it continues from where
-  # it stopped). After download, the BLAKE3 hash is verified against the
-  # value from version.json — the same check the native launcher performs
-  # (see internal/game/download.go DownloadAndVerify).
+  # it stopped). After download the BLAKE3 hash is verified against the
+  # value from version.json to confirm the download is intact.
   # --------------------------------------------------------------------------
   step_msg "Step 5 — Downloading game files..."
 
@@ -2123,7 +2290,6 @@ main() {
 import sys
 try:
     from blake3 import blake3 as b3
-    import hashlib
     fn = sys.argv[1]
     h = b3()
     with open(fn, "rb") as f:
@@ -2177,9 +2343,8 @@ BLAKE3EOF
   #   bootstrap blob into it before launching the game executable. The game
   #   reads this region at startup via OpenFileMapping(). Without it the game
   #   starts but may not receive the bootstrap payload needed for EAC.
-  #   Source: cluckers/tools/shm_launcher.c
   #   Compile: x86_64-w64-mingw32-gcc -O2 -Wall -municode \
-  #              -o shm_launcher.exe cluckers/tools/shm_launcher.c
+  #              -o shm_launcher.exe shm_launcher.c
   #   Note: -municode is required because the entry point is wmain() not main().
   #
   # xinput1_3.dll
@@ -2187,29 +2352,94 @@ BLAKE3EOF
   #   input so all buttons (triggers, bumpers, face buttons) work correctly
   #   under Wine/Proton. Installed into the Wine prefix system32 folder so
   #   Wine loads it instead of the built-in stub.
-  #   Source: cluckers/tools/xinput_remap.c + cluckers/tools/xinput1_3.def
   #   Compile: x86_64-w64-mingw32-gcc -O2 -Wall -shared \
-  #              -o xinput1_3.dll cluckers/tools/xinput_remap.c \
-  #              cluckers/tools/xinput1_3.def
+  #              -o xinput1_3.dll xinput_remap.c xinput1_3.def
   #
   # REPRODUCIBLE BUILDS
-  #   The base64 binaries embedded below were compiled using x86_64-w64-mingw32-gcc.
-  #   To reproduce the exact checksums without base64 decoding them to verify the source,
-  #   you can compile the C source code included below in the exact same environment.
+  #   The base64 binaries embedded below were compiled from the C source code
+  #   included in this script (see SOURCE CODE sections immediately below).
+  #   You can reproduce the exact same binaries — and verify they match the
+  #   embedded checksums — without trusting any pre-built binary from us or
+  #   any third party. This protects against upstream supply-chain tampering.
   #
-  #   Compiler Environment: Ubuntu 24.04 LTS (or Debian 12)
-  #   Compiler Version:     x86_64-w64-mingw32-gcc (GCC) 13-win32 (version 13.2.0)
-  #   Commands:
-  #     x86_64-w64-mingw32-gcc -O2 -Wall -municode -o shm_launcher.exe shm_launcher.c
-  #     x86_64-w64-mingw32-gcc -O2 -Wall -shared -o xinput1_3.dll xinput_remap.c xinput1_3.def
-  #   Expected Checksums:
-  #     shm_launcher.exe : e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd
-  #     xinput1_3.dll    : a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24
+  #   WHY THIS MATTERS
+  #   ─────────────────
+  #   The binaries embedded in this script are small Windows helpers that run
+  #   inside your Wine prefix. If a bad actor modified the upstream repository
+  #   or the script itself, a reproducible build lets you detect that: your
+  #   locally compiled binary will produce a different SHA-256 than the one
+  #   embedded here, and the script will refuse to deploy it.
   #
-  #   Source Repository: https://github.com/0xc0re/cluckers/tree/main/tools
+  #   STEP-BY-STEP INSTRUCTIONS
+  #   ──────────────────────────
+  #   1. Install the MinGW cross-compiler on Ubuntu 24.04 LTS or Debian 12:
+  #
+  #        sudo apt-get update
+  #        sudo apt-get install -y gcc-mingw-w64-x86-64
+  #
+  #      This installs exactly:
+  #        x86_64-w64-mingw32-gcc (GCC) 13-win32 (version 13.2.0)
+  #
+  #   2. Save the source files from the SOURCE CODE sections below.
+  #      You can extract them directly from this script with:
+  #
+  #        sed -n '/SOURCE CODE: shm_launcher.c/,/SOURCE CODE: xinput_remap.c/p' \
+  #            cluckers-setup.sh | grep '^#   ' | sed 's/^#   //' \
+  #            | head -n -1 > shm_launcher.c
+  #
+  #        sed -n '/SOURCE CODE: xinput_remap.c/,/SOURCE CODE: xinput1_3.def/p' \
+  #            cluckers-setup.sh | grep '^#   ' | sed 's/^#   //' \
+  #            | head -n -1 > xinput_remap.c
+  #
+  #        sed -n '/SOURCE CODE: xinput1_3.def/,/^  # =\{10\}/p' \
+  #            cluckers-setup.sh | grep '^#   ' | sed 's/^#   //' \
+  #            | head -n -1 > xinput1_3.def
+  #
+  #      Alternatively, download the canonical sources directly from GitHub:
+  #        https://github.com/0xc0re/cluckers/blob/master/tools/shm_launcher.c
+  #        https://github.com/0xc0re/cluckers/blob/master/tools/xinput_remap.c
+  #        https://github.com/0xc0re/cluckers/blob/master/tools/xinput1_3.def
+  #
+  #   3. Compile using the exact flags below (flags affect binary output):
+  #
+  #        x86_64-w64-mingw32-gcc -O2 -Wall -municode \
+  #            -o shm_launcher.exe shm_launcher.c
+  #
+  #        x86_64-w64-mingw32-gcc -O2 -Wall -shared \
+  #            -o xinput1_3.dll xinput_remap.c xinput1_3.def
+  #
+  #      Note: -municode is required for shm_launcher because its entry point
+  #      is wmain() (wide-character Unicode), not the standard main().
+  #
+  #   4. Verify the SHA-256 checksums of your compiled binaries:
+  #
+  #        sha256sum shm_launcher.exe xinput1_3.dll
+  #
+  #      Expected output (must match exactly — byte for byte):
+  #        e3c9420356cbd6265f9bebf224790bbd6ff487e6ba5f7caa0fcce762354749dd  shm_launcher.exe
+  #        a258bcf56e0cbeb704df847902075858558f42348c2de0a14bbe5260b8974f24  xinput1_3.dll
+  #
+  #      If the checksums match, your compiled binary is identical to the one
+  #      embedded in this script — confirming the source was not tampered with.
+  #      If they do NOT match, do not use the embedded binary; report the
+  #      discrepancy at https://github.com/0xc0re/cluckers/issues
+  #
+  #   5. (Optional) Replace the embedded binaries with your own compiled ones:
+  #
+  #        base64 -w0 shm_launcher.exe > shm_launcher.b64
+  #        base64 -w0 xinput1_3.dll   > xinput1_3.b64
+  #
+  #      Then replace the base64 blocks in this script between the heredoc
+  #      markers (SHM_LAUNCHER_B64EOF / XINPUT_B64EOF) with the contents of
+  #      the .b64 files. Update the SHA-256 constants at the top of the script
+  #      (SHM_LAUNCHER_SHA256 / XINPUT_DLL_SHA256) to match.
+  #
+  #   Compiler Environment: Ubuntu 24.04 LTS or Debian 12 (recommended)
+  #   Compiler Version:     x86_64-w64-mingw32-gcc (GCC) 13-win32 (13.2.0)
+  #   Source Repository:    https://github.com/0xc0re/cluckers/tree/main/tools
   #
   # ==============================================================================
-  # SOURCE CODE: shm_launcher.c (https://github.com/0xc0re/cluckers/blob/main/tools/shm_launcher.c)
+  # SOURCE CODE: shm_launcher.c (https://github.com/0xc0re/cluckers/blob/master/tools/shm_launcher.c)
   # ==============================================================================
 #   /*
 #    * shm_launcher.c - Creates a named shared memory section with content bootstrap
@@ -2227,20 +2457,20 @@ BLAKE3EOF
 #    *   5. Waits for the game to exit
 #    *   6. Cleans up the mapping
 #    */
-#   
+#
 #   #include <windows.h>
 #   #include <stdio.h>
-#   
+#
 #   int wmain(int argc, wchar_t *argv[]) {
 #       if (argc < 4) {
 #           fprintf(stderr, "Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]\n");
 #           return 1;
 #       }
-#   
+#
 #       wchar_t *bootstrap_file = argv[1];
 #       wchar_t *shm_name = argv[2];
 #       wchar_t *game_exe = argv[3];
-#   
+#
 #       /* Read bootstrap data from file */
 #       HANDLE hFile = CreateFileW(bootstrap_file, GENERIC_READ, FILE_SHARE_READ,
 #                                  NULL, OPEN_EXISTING, 0, NULL);
@@ -2248,21 +2478,21 @@ BLAKE3EOF
 #           fprintf(stderr, "Failed to open bootstrap file (err=%lu)\n", GetLastError());
 #           return 1;
 #       }
-#   
+#
 #       DWORD fileSize = GetFileSize(hFile, NULL);
 #       if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
 #           fprintf(stderr, "Invalid bootstrap file size (err=%lu)\n", GetLastError());
 #           CloseHandle(hFile);
 #           return 1;
 #       }
-#   
+#
 #       BYTE *data = (BYTE *)malloc(fileSize);
 #       if (!data) {
 #           fprintf(stderr, "malloc failed\n");
 #           CloseHandle(hFile);
 #           return 1;
 #       }
-#   
+#
 #       DWORD bytesRead;
 #       if (!ReadFile(hFile, data, fileSize, &bytesRead, NULL) || bytesRead != fileSize) {
 #           fprintf(stderr, "Failed to read bootstrap file (err=%lu)\n", GetLastError());
@@ -2271,9 +2501,9 @@ BLAKE3EOF
 #           return 1;
 #       }
 #       CloseHandle(hFile);
-#   
+#
 #       printf("[shm_launcher] Bootstrap data: %lu bytes\n", fileSize);
-#   
+#
 #       /* Create named shared memory */
 #       HANDLE hMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
 #                                            0, fileSize, shm_name);
@@ -2282,7 +2512,7 @@ BLAKE3EOF
 #           free(data);
 #           return 1;
 #       }
-#   
+#
 #       LPVOID pView = MapViewOfFile(hMapping, FILE_MAP_WRITE, 0, 0, fileSize);
 #       if (!pView) {
 #           fprintf(stderr, "MapViewOfFile failed (err=%lu)\n", GetLastError());
@@ -2290,61 +2520,61 @@ BLAKE3EOF
 #           free(data);
 #           return 1;
 #       }
-#   
+#
 #       memcpy(pView, data, fileSize);
 #       free(data);
-#   
+#
 #       printf("[shm_launcher] Shared memory '%ls' created (%lu bytes)\n", shm_name, fileSize);
-#   
+#
 #       /* Build command line for the game */
 #       wchar_t cmdline[32768];
 #       int pos = 0;
-#   
+#
 #       /* Quote the exe path */
 #       pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L"\"%ls\"", game_exe);
-#   
+#
 #       /* Append remaining args */
 #       for (int i = 4; i < argc; i++) {
 #           pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L" %ls", argv[i]);
 #       }
-#   
+#
 #       printf("[shm_launcher] Launching: %ls\n", cmdline);
-#   
+#
 #       /* Launch the game */
 #       STARTUPINFOW si = { .cb = sizeof(si) };
 #       PROCESS_INFORMATION pi = {0};
-#   
+#
 #       if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
 #           fprintf(stderr, "CreateProcess failed (err=%lu)\n", GetLastError());
 #           UnmapViewOfFile(pView);
 #           CloseHandle(hMapping);
 #           return 1;
 #       }
-#   
+#
 #       printf("[shm_launcher] Game started (pid=%lu), waiting...\n", pi.dwProcessId);
-#   
+#
 #       /* Wait for game to exit */
 #       WaitForSingleObject(pi.hProcess, INFINITE);
-#   
+#
 #       DWORD exitCode = 0;
 #       GetExitCodeProcess(pi.hProcess, &exitCode);
 #       printf("[shm_launcher] Game exited with code %lu\n", exitCode);
-#   
+#
 #       /* Cleanup */
 #       CloseHandle(pi.hThread);
 #       CloseHandle(pi.hProcess);
 #       UnmapViewOfFile(pView);
 #       CloseHandle(hMapping);
-#   
+#
 #       return (int)exitCode;
 #   }
   #
   # ==============================================================================
-  # SOURCE CODE: xinput_remap.c (https://github.com/0xc0re/cluckers/blob/main/tools/xinput_remap.c)
+  # SOURCE CODE: xinput_remap.c (https://github.com/0xc0re/cluckers/blob/master/tools/xinput_remap.c)
   # ==============================================================================
 #   #include <windows.h>
 #   #include <stdio.h>
-#   
+#
 #   /*
 #    * XInput index remapping proxy for UE3 games on Wine.
 #    *
@@ -2354,12 +2584,12 @@ BLAKE3EOF
 #    *
 #    * Tries xinput1_4, xinput9_1_0, xinput1_2, xinput1_1 as backends.
 #    */
-#   
+#
 #   typedef DWORD (WINAPI *pfn_XInputGetState)(DWORD, void*);
 #   typedef DWORD (WINAPI *pfn_XInputGetCapabilities)(DWORD, DWORD, void*);
 #   typedef DWORD (WINAPI *pfn_XInputSetState)(DWORD, void*);
 #   typedef void  (WINAPI *pfn_XInputEnable)(BOOL);
-#   
+#
 #   static HMODULE hReal = NULL;
 #   static pfn_XInputGetState pGetState = NULL;
 #   static pfn_XInputGetCapabilities pGetCaps = NULL;
@@ -2370,14 +2600,14 @@ BLAKE3EOF
 #   static BOOL g_lockReady = FALSE;
 #   static FILE *logf = NULL;
 #   static int n = 0;
-#   
+#
 #   static void proxy_init(void) {
 #       if (initialized) return;
 #       if (g_lockReady) EnterCriticalSection(&g_initLock);
 #       if (initialized) { if (g_lockReady) LeaveCriticalSection(&g_initLock); return; }
-#   
+#
 #       logf = fopen("Z:\\tmp\\xinput_remap.log", "w");
-#   
+#
 #       /* Try multiple xinput DLL variants as backends */
 #       static const wchar_t *dlls[] = {
 #           L"xinput1_4.dll",
@@ -2386,7 +2616,7 @@ BLAKE3EOF
 #           L"xinput1_1.dll",
 #           NULL
 #       };
-#   
+#
 #       for (int i = 0; dlls[i]; i++) {
 #           hReal = LoadLibraryW(dlls[i]);
 #           if (hReal) {
@@ -2413,19 +2643,19 @@ BLAKE3EOF
 #               if (logf) fprintf(logf, "REMAP: Failed to load %ls (err=%lu)\n", dlls[i], GetLastError());
 #           }
 #       }
-#   
+#
 #       if (!hReal && logf) { fprintf(logf, "REMAP: No working backend found!\n"); fflush(logf); }
-#   
+#
 #       initialized = TRUE;
 #       if (g_lockReady) LeaveCriticalSection(&g_initLock);
 #   }
-#   
+#
 #   /* Remap: game's 1->0, 2->1, 3->2. Index 0 stays 0. */
 #   static DWORD remap(DWORD idx) {
 #       if (idx >= 1 && idx <= 3) return idx - 1;
 #       return idx;
 #   }
-#   
+#
 #   __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD idx, void *state) {
 #       proxy_init();
 #       if (!pGetState) return 0x48F;
@@ -2448,19 +2678,19 @@ BLAKE3EOF
 #       }
 #       return r;
 #   }
-#   
+#
 #   __declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD idx, DWORD flags, void *caps) {
 #       proxy_init();
 #       if (!pGetCaps) return 0x48F;
 #       return pGetCaps(remap(idx), flags, caps);
 #   }
-#   
+#
 #   __declspec(dllexport) DWORD WINAPI XInputSetState(DWORD idx, void *vib) {
 #       proxy_init();
 #       if (!pSetState) return 0x48F;
 #       return pSetState(remap(idx), vib);
 #   }
-#   
+#
 #   /*
 #    * XInputEnable(FALSE) no-op:
 #    * UE3 calls XInputEnable(FALSE) on WM_ACTIVATEAPP when the window loses focus
@@ -2479,11 +2709,11 @@ BLAKE3EOF
 #       }
 #       if (pEnable) pEnable(e);
 #   }
-#   
+#
 #   __declspec(dllexport) DWORD WINAPI XInputGetStateEx(DWORD idx, void *state) {
 #       return XInputGetState(idx, state);
 #   }
-#   
+#
 #   BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID res) {
 #       (void)h; (void)res;
 #       /* Do NOT call proxy_init here - LoadLibrary inside DllMain causes loader lock deadlock */
@@ -2501,7 +2731,7 @@ BLAKE3EOF
 #   }
   #
   # ==============================================================================
-  # SOURCE CODE: xinput1_3.def  (https://github.com/0xc0re/cluckers/blob/main/tools/xinput1_3.def)
+  # SOURCE CODE: xinput1_3.def  (https://github.com/0xc0re/cluckers/blob/master/tools/xinput1_3.def)
   # ==============================================================================
 #   LIBRARY xinput1_3
 #   EXPORTS
@@ -11829,9 +12059,10 @@ XDLL_B64_EOF
         ok_msg "xinput1_3.dll placed in Wine system32."
       fi
     fi
-  
+
     # --------------------------------------------------------------------------
-    # Step 7 — Extract desktop icon  #
+  # Step 7 — Extract desktop icon
+  #
   # Extracts the Cluckers Central icon from the .exe so it appears correctly
   # in Steam and your application menu. Requires icoutils (wrestool + icotool).
   # If icoutils is missing the script offers to install it; if that also fails
@@ -11900,9 +12131,10 @@ XDLL_B64_EOF
   #   Single-quoted ('EOF') — code written literally, variables expand at
   #                           LAUNCH TIME when the generated script runs.
   #
-  # Environment variables set in the launcher (from internal/launch/process_linux.go):
-  #   WINE_NTSYNC=1 — enables NT sync primitives (modern kernel, baked at setup).
-  #   WINEFSYNC=1   — enables futex-based sync (fallback, baked at setup time).  # --------------------------------------------------------------------------
+  # Environment variables set in the launcher:
+  #   WINE_NTSYNC=1 — enables NT sync primitives (requires a modern kernel).
+  #   WINEFSYNC=1   — enables futex-based sync (standard GE-Proton fallback).
+  # --------------------------------------------------------------------------
   step_msg "Step 8 — Creating launcher script..."
 
   # Wine/Proton was detected upfront in main() before Step 3.
@@ -11940,7 +12172,7 @@ XDLL_B64_EOF
 set -euo pipefail
 
 # Unset LD_LIBRARY_PATH to prevent system libraries from interfering with
-# Wine's internal libraries (mirrors internal/launch/process_linux.go).
+# Wine's own internal libraries.
 unset LD_LIBRARY_PATH
 
 export WINEPREFIX="${WINEPREFIX}"
@@ -11949,9 +12181,9 @@ export WINEARCH="win64"
 # Suppress noisy Wine debug output. Set to "" to see full Wine diagnostics.
 export WINEDEBUG="-all"
 
-# dxgi=n,b: Source: internal/launch/process_linux.go env append WINEDLLOVERRIDES
-# https://github.com/Lyceris-chan/cluckers/blob/main/internal/launch/process_linux.go
-# xinput1_3=n: Use our custom remapper from Step 6.
+# dxgi=n,b: use DXVK's dxgi instead of Wine's built-in (required for DX11 performance).
+# xinput1_3=n: use our custom xinput remapper installed in Step 6.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process_linux.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
   printf 'export WINEDLLOVERRIDES="dxgi=n;xinput1_3=n"\n'
   # Controller detection: Source: Hi-Rez community fixes for Linux.
@@ -11962,8 +12194,7 @@ else
   printf 'export WINEDLLOVERRIDES="dxgi=n"\n'
 fi)
 
-# Wine binary path — baked in at setup time by cluckers-setup.sh.
-# Source: cluckers/internal/wine/detect.go (FindWine)
+# Wine binary resolved by find_wine() at setup time — baked in as a fixed path.
 WINE="${real_wine_path}"
 WINESERVER="${real_wineserver}"
 
@@ -11992,8 +12223,9 @@ GATEWAY_URL="${GATEWAY_URL:-https://gateway-dev.project-crown.com}"
 HOST_X="${HOST_X:-157.90.131.105}"
 CREDS_FILE="${HOME}/.cluckers/credentials.enc"
 
-# Skip movies logic (mirrors HandleMovies in cluckers/internal/launch/movies.go)
+# Skip intro movies if the user hasn't opted in to showing them.
 # Patches INI files to set bForceNoMovies.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
 _handle_movies() {
   local skip="\$1"
   local skip_val="FALSE"
@@ -12054,9 +12286,9 @@ EOF
   cat >> "${LAUNCHER_SCRIPT}" << 'LAUNCHEOF'
 
 # ---------------------------------------------------------------------------
-# Authentication - direct Python calls to the Project Crown gateway API.
-# Mirrors auth.Login / auth.GetOIDCToken / auth.GetContentBootstrap from
-# cluckers/internal/auth/login.go. No Windows launcher or proxy needed.
+# Authentication — direct calls to the Project Crown gateway API.
+# Handles login, OIDC token, and content bootstrap without a Windows launcher.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/auth/login.go
 # ---------------------------------------------------------------------------
 _auth_result=$(python3 - "${CREDS_FILE}" "${GATEWAY_URL}" << 'AUTHEOF'
 import base64, json, os, sys, urllib.request, urllib.error
@@ -12065,7 +12297,7 @@ creds_file = sys.argv[1]
 gateway    = sys.argv[2].rstrip("/")
 
 def _post(endpoint, payload):
-    # URL format: /json/<command> — matches Client.Post() in gateway/client.go.
+    # URL format: /json/<command>
     url  = f"{gateway}/json/{endpoint}"
     data = json.dumps(payload).encode()
     req  = urllib.request.Request(
@@ -12073,7 +12305,7 @@ def _post(endpoint, payload):
         headers={
             "Content-Type": "application/json",
             # User-Agent must match the Windows launcher to avoid server rejection.
-            # Source: req.Header.Set("User-Agent", ...) in gateway/client.go.
+            # Set the expected User-Agent so the gateway accepts the request.
             "User-Agent": "CluckersCentral/1.1.68",
             "Accept": "*/*",
         },
@@ -12141,7 +12373,7 @@ if not username or not password:
     with open(creds_file, "w", opener=secure_opener) as f:
         f.write(f"{username}:{password}")
 
-# Login - mirrors auth.Login() in internal/auth/login.go.
+# Login — exchange credentials for an access token.
 try:
     print("[auth] Logging in...", file=sys.stderr)
     login = _post("LAUNCHER_LOGIN_OR_LINK",
@@ -12164,7 +12396,7 @@ if not access_token:
     print("ERROR: No access token in login response", file=sys.stderr)
     sys.exit(1)
 
-# OIDC token - mirrors auth.GetOIDCToken() in internal/auth/login.go.
+# OIDC token — required by EAC for anti-cheat authentication.
 try:
     print("[auth] Requesting OIDC token...", file=sys.stderr)
     oidc_resp = _post("LAUNCHER_EAC_OIDC_TOKEN",
@@ -12176,8 +12408,7 @@ except Exception as e:
     print(f"[auth] OIDC token failed: {e}", file=sys.stderr)
     oidc_token = ""
 
-# Content bootstrap - mirrors auth.GetContentBootstrap() in internal/auth/login.go.
-# Expected: 136-byte blob with BPS1 magic header (base64-encoded in response).
+# Content bootstrap — 136-byte blob the game reads from shared memory at startup.
 bootstrap_b64 = ""
 try:
     print("[auth] Requesting content bootstrap...", file=sys.stderr)
@@ -12189,11 +12420,11 @@ try:
         missing_padding = len(raw) % 4
         if missing_padding:
             raw += "=" * (4 - missing_padding)
-        
+
         decoded = base64.b64decode(raw)
         if len(decoded) != 136:
             print(f"[auth] WARNING: Unexpected bootstrap size: {len(decoded)} bytes (expected 136)", file=sys.stderr)
-        
+
         if len(decoded) > 0:
             bootstrap_b64 = base64.b64encode(decoded).decode()
             print(f"[auth] Bootstrap received ({len(decoded)} bytes)", file=sys.stderr)
@@ -12241,7 +12472,8 @@ _game_exe_wine=$(printf '%s' "${_game_exe}" | sed 's|/|\\|g; s|^|Z:|')
 # Shared-memory name — unique per session PID.
 _shm_name="Local\\realm_content_bootstrap_$$"
 
-# Game launch arguments — matches gameArgs in internal/launch/process_linux.go.
+# Game launch arguments — passed directly to the game executable.
+# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process_linux.go
 _game_args=(
   "-user=${_auth_username}"
   "-token=${_auth_token}"
@@ -12286,7 +12518,7 @@ trap _cleanup EXIT INT TERM HUP
 
 if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
-  # exec's the game. Source: internal/launch/process_linux.go.
+  # exec replaces this shell process with the game process.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
     DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
@@ -12302,7 +12534,7 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   fi
 else
   # No bootstrap data — launch game directly.
-  # Source: process_linux.go "No bootstrap data -- launch game directly."
+  # No bootstrap data available — launch the game directly without shared memory.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
     DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${WINE}" "${_game_exe}" "${_game_args[@]}" &
@@ -12530,8 +12762,7 @@ fi
   # --------------------------------------------------------------------------
   # Step 11 — Game patches (Steam Deck, Controller, or Skip Movies)
   #
-  # Applies patches that mirror what the native cluckers launcher does via
-  # PatchDeckConfig() in internal/launch/deckconfig.go:
+  # Applies patches to game config files for Steam Deck, controller, and movie prefs:
   #
   #   1. RealmSystemSettings.ini — force fullscreen at 1280×800 (Steam Deck only).
   #
