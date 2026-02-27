@@ -321,26 +321,22 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 #  System dependency helpers
 # ==============================================================================
 
-# Returns the PATH and LD_LIBRARY_PATH additions required for a Wine binary.
+# Returns the PATH, LD_LIBRARY_PATH, and WINELOADER required for a Wine binary.
 #
 # Arguments:
 #   $1 - wine_path: Absolute path to the wine or wine64 binary.
 #
 # Returns:
-#   Prints "PATH_ADD:LD_LIB_ADD" to stdout.
+#   Prints "BIN_DIR|LD_LIB_ADD|LOADER_PATH" to stdout.
 get_wine_env_additions() {
   local wine_path="$1"
   local bin_dir
   local root_dir
-  bin_dir="$(dirname "${wine_path}")"
-  root_dir="$(dirname "${bin_dir}")"
+  bin_dir=$(readlink -f "$(dirname "${wine_path}")")
+  root_dir=$(readlink -f "$(dirname "${bin_dir}")")
   
   local libs=""
   local ld
-  # Use the absolute path of root_dir
-  if [[ -d "${root_dir}" ]]; then
-    root_dir=$(readlink -f "${root_dir}")
-  fi
 
   # Search for standard and architecture-specific lib folders.
   local lib_dirs=(
@@ -367,10 +363,10 @@ get_wine_env_additions() {
      done
   fi
   
-  # Also include common system library paths as fallback
+  # Include common system library paths as fallback
   libs="${libs}:/usr/lib64:/usr/lib:/lib64:/lib"
   
-  printf "%s|%s" "${bin_dir}" "${libs}"
+  printf "%s|%s|%s" "${bin_dir}" "${libs}" "${wine_path}"
 }
 
 # Returns 0 if the local game matches the version info on the server.
@@ -803,13 +799,14 @@ install_winetricks_multi() {
   # winetricks can find Wine's internal DLLs (like kernel32.dll) and binaries.
   #
   # shellcheck disable=SC2086
-  local env_adds bin_add lib_add
+  local env_adds bin_add lib_add loader_add
   env_adds=$(get_wine_env_additions "${maint_wine}")
-  bin_add="${env_adds%%|*}"
-  lib_add="${env_adds##*|}"
+  bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
+  lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
   if env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
      PATH="${bin_add}:${PATH}" \
      LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+     WINELOADER="${loader_add}" \
      DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
      winetricks ${wt_flags} "${to_install[@]}"; then
     ok_msg "${desc} installed successfully."
@@ -2601,13 +2598,14 @@ main() {
       #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
       # env is used instead of inline VAR=value syntax because WINEPREFIX is
       # declared readonly and bash rejects inline re-assignment of readonly vars.
-      local env_adds bin_add lib_add
+      local env_adds bin_add lib_add loader_add
       env_adds=$(get_wine_env_additions "${maint_wine}")
-      bin_add="${env_adds%%|*}"
-      lib_add="${env_adds##*|}"
+      bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
+      lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
       env WINEPREFIX="${WINEPREFIX}" DISPLAY="" \
         PATH="${bin_add}:${PATH}" \
         LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        WINELOADER="${loader_add}" \
         WINEDLLOVERRIDES="mscoree,mshtml=" \
         WINE="${maint_wine}" WINESERVER="${maint_server}" \
         "${maint_wine}" wineboot --init || true
@@ -2615,6 +2613,7 @@ main() {
       env WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
         PATH="${bin_add}:${PATH}" \
         LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        WINELOADER="${loader_add}" \
         "${maint_server}" -w || true
     fi
     ok_msg "Wine prefix created."
@@ -12579,9 +12578,6 @@ XDLL_B64_EOF
   # Step 7 — Extract desktop icon
   #
   # Extracts the Cluckers Central icon from the .exe so it appears correctly
-  # in Steam and your application menu. Requires icoutils (wrestool + icotool).
-  # If icoutils is missing the script offers to install it; if that also fails
-  # the game still works but will show a generic Wine icon.
   # --------------------------------------------------------------------------
   # Step 7 — Downloading high-quality game assets
   #
@@ -12626,7 +12622,6 @@ XDLL_B64_EOF
       fi
       rm -f "${ico_tmp}"
     else
-      # ... [icoutils manual install block continues below] ...
       if [[ "${auto_mode}" == "false" ]]; then
         printf "\n  icoutils is not installed (needed to extract the game icon).\n"
         printf "  Install command for your distro:\n"
@@ -12717,9 +12712,12 @@ set -euo pipefail
 # outside of Steam. We prepend them to any existing paths.
 _env_adds="$(get_wine_env_additions "${real_wine_path}")"
 _bin_add="\${_env_adds%%|*}"
-_lib_add="\${_env_adds##*|}"
+_temp="\${_env_adds#*|}"
+_lib_add="\${_temp%%|*}"
+_loader_add="\${_env_adds##*|}"
 export PATH="\${_bin_add}:\${PATH}"
 export LD_LIBRARY_PATH="\${_lib_add}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
+export WINELOADER="\${_loader_add}"
 
 export WINEPREFIX="${WINEPREFIX}"
 export WINEARCH="win64"
@@ -13168,7 +13166,7 @@ Icon=${ICON_PATH}
 Terminal=false
 Type=Application
 Categories=Game;
-StartupWMClass=cluckers-central
+StartupWMClass=ShippingPC-RealmGameNoEditor.exe
 EOF
 
   chmod +x "${DESKTOP_FILE}"
@@ -13355,16 +13353,22 @@ try:
         STEAM_LOGO: ["_logo"],  # Clear logo
     }
 
+    # For non-Steam games, Steam sometimes uses the 64-bit AppID for art.
+    # We deploy to both the 32-bit CRC ID and the 64-bit ID to be safe.
+    # 64-bit ID = (unsigned_32bit_id << 32) | 0x02000000
+    long_id = (unsigned_id << 32) | 0x02000000
+
     for src, suffixes in art_map.items():
         if not os.path.exists(src):
             continue
+        ext = os.path.splitext(src)[1]
         for suffix in suffixes:
-            dest_ext = os.path.splitext(src)[1]
-            dest = os.path.join(grid_dir, f"{grid_appid}{suffix}{dest_ext}")
-            try:
-                shutil.copy2(src, dest)
-            except Exception:
-                pass
+            for aid in [str(unsigned_id), str(long_id)]:
+                dest = os.path.join(grid_dir, f"{aid}{suffix}{ext}")
+                try:
+                    shutil.copy2(src, dest)
+                except Exception:
+                    pass
 
     print(f"{_OK} Added Cluckers Central to Steam library (including artwork).")
 except Exception as exc:  # pylint: disable=broad-except
