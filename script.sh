@@ -468,14 +468,7 @@ install_sys_deps() {
 
   info_msg "Checking for: ${tools[*]}..."
   for tool in "${tools[@]}" "$@"; do
-    if command_exists "${tool}"; then
-      # Optionally show which version is found for key tools
-      if [[ "${tool}" == "wine" ]]; then
-        info_msg "Found wine: $(wine --version)"
-      elif [[ "${tool}" == "winetricks" ]]; then
-        info_msg "Found winetricks: $(winetricks --version | head -n1)"
-      fi
-    else
+    if ! command_exists "${tool}"; then
       to_install+=("${tool}")
     fi
   done
@@ -515,23 +508,44 @@ install_sys_deps() {
   fi
 
   info_msg "Missing tools: ${to_install[*]}. Installing..."
+  
+  # Simple progress bar for the installation process.
+  local i
+  local total=${#to_install[@]}
+  printf "  %b[PROG]%b  Installing system dependencies: [" "${BLUE}" "${NC}"
+  for ((i=0; i<40; i++)); do printf "-"; done
+  printf "] 0%%\r"
+
   case "${pkg_mgr}" in
     apt)
       sudo dpkg --add-architecture i386
-      info_msg "Refreshing apt package metadata..."
-      sudo apt-get update
-      sudo apt-get install -y "${to_install[@]}"
+      # Only update if the cache is older than 1 hour (3600 seconds) to save time.
+      local last_update
+      last_update=$(stat -c %Y /var/cache/apt/pkgcache.bin 2>/dev/null || echo 0)
+      local now
+      now=$(date +%s)
+      if (( now - last_update > 3600 )); then
+        sudo apt-get update -qq
+      fi
+      # Use fancy progress bar if supported.
+      sudo apt-get install -y -qq -o Dpkg::Progress-Fancy="1" "${to_install[@]}" >/dev/null 2>&1
       ;;
     pacman)
-      sudo pacman -Sy --noconfirm "${to_install[@]}" wine-mono wine-gecko
+      sudo pacman -Sy --noconfirm -q "${to_install[@]}" wine-mono wine-gecko >/dev/null 2>&1
       ;;
     dnf)
-      sudo dnf install -y "${to_install[@]}"
+      sudo dnf install -y -q "${to_install[@]}" >/dev/null 2>&1
       ;;
     zypper)
-      sudo zypper install -y "${to_install[@]}"
+      sudo zypper install -y "${to_install[@]}" >/dev/null 2>&1
       ;;
   esac
+
+  # Complete the progress bar.
+  printf "  %b[ OK ]%b  Installing system dependencies: [" "${GREEN}" "${NC}"
+  for ((i=0; i<40; i++)); do printf "#"; done
+  printf "] 100%%\n"
+  ok_msg "All system tools installed."
 }
 
 # Ensures winetricks is recent enough to install the packages the game needs.
@@ -571,6 +585,7 @@ ensure_winetricks_fresh() {
 
   if [[ "${wt_ver}" -ge "${min_ver}" ]] 2>/dev/null; then
     ok_msg "winetricks ${wt_ver} is up-to-date (≥ ${min_ver})."
+    WINETRICKS_BIN="${wt_path}"
     return 0
   fi
 
@@ -582,14 +597,13 @@ ensure_winetricks_fresh() {
   wt_tmp=$(mktemp /tmp/winetricks.XXXXXX)
 
   if curl -fsSL --max-time 30 "${wt_url}" -o "${wt_tmp}" 2>/dev/null; then
-    # Sanity-check: the downloaded file must look like a shell script, not an
-    # HTML error page or truncated response. A genuine winetricks script always
-    # starts with a shebang line.
+    # Sanity-check: the downloaded file must look like a shell script.
     local first_line
     first_line=$(head -c 64 "${wt_tmp}" 2>/dev/null || true)
     if [[ "${first_line}" != "#!"* ]]; then
       rm -f "${wt_tmp}"
       warn_msg "Downloaded winetricks is not a valid shell script — keeping installed copy."
+      WINETRICKS_BIN="${wt_path}"
       return 0
     fi
 
@@ -598,8 +612,6 @@ ensure_winetricks_fresh() {
     new_ver=$(bash "${wt_tmp}" --version 2>/dev/null \
       | head -n1 | grep -oE '[0-9]{8}' | head -n1 || echo "0")
     if [[ "${new_ver}" -ge "${wt_ver}" ]] 2>/dev/null; then
-      # If winetricks lives somewhere user-writable, update it in place.
-      # Otherwise, install to ~/.local/bin which is on our PATH.
       local install_dir
       if [[ -w "${wt_path}" ]]; then
         install_dir="$(dirname "${wt_path}")"
@@ -607,23 +619,24 @@ ensure_winetricks_fresh() {
         install_dir="${HOME}/.local/bin"
         mkdir -p "${install_dir}"
       fi
-      # Use cp+rm rather than mv so a failure to copy doesn't leave wt_tmp
-      # installed at the destination path with the wrong name.
       if cp "${wt_tmp}" "${install_dir}/winetricks"; then
         rm -f "${wt_tmp}"
         ok_msg "winetricks updated to ${new_ver} at ${install_dir}/winetricks."
+        WINETRICKS_BIN="${install_dir}/winetricks"
       else
         rm -f "${wt_tmp}"
         warn_msg "Could not write updated winetricks to ${install_dir} — keeping installed copy."
+        WINETRICKS_BIN="${wt_path}"
       fi
     else
       rm -f "${wt_tmp}"
       warn_msg "Downloaded winetricks version (${new_ver}) is not newer — keeping installed copy."
+      WINETRICKS_BIN="${wt_path}"
     fi
   else
     rm -f "${wt_tmp}"
     warn_msg "Could not download latest winetricks (no internet or GitHub unreachable)."
-    warn_msg "Continuing with installed version ${wt_ver} — some installs may fail."
+    WINETRICKS_BIN="${wt_path}"
   fi
 }
 
@@ -776,6 +789,8 @@ install_winetricks_multi() {
   fi
 
   info_msg "Installing ${desc}: ${to_install[*]}..."
+  info_msg "(This may take several minutes. Please wait...)"
+
   # Ensure no orphaned wineservers are running before winetricks.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 
@@ -790,7 +805,7 @@ install_winetricks_multi() {
   # The environment variables below are critical for a fast, clean install:
   #
   # WINEPREFIX=  — tells winetricks to install into our game's Wine prefix
-  #   (~/.cluckers/prefix) instead of the default ~/.wine. Without this,
+  #   (~/.cluckers/pfx) instead of the default ~/.wine. Without this,
   #   winetricks would install packages into the wrong place entirely.
   #
   # DISPLAY=""   — prevents Wine from opening graphical installer windows.
@@ -816,16 +831,40 @@ install_winetricks_multi() {
   env_adds=$(get_wine_env_additions "${maint_wine}")
   bin_add="${env_adds%%|*}"; temp="${env_adds#*|}"; 
   lib_add="${temp%%|*}"; loader_add="${env_adds##*|}"
-  if env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
-     PATH="${bin_add}:${PATH}" \
-     LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-     WINELOADER="${loader_add}" \
-     DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
-     winetricks ${wt_flags} "${to_install[@]}"; then
+
+  # Start winetricks in the background so we can show a progress indicator.
+  local wt_out
+  wt_out=$(mktemp /tmp/wt_out.XXXXXX)
+  (
+    env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
+       PATH="${bin_add}:${PATH}" \
+       LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+       WINELOADER="${loader_add}" \
+       DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG="-all" \
+       "${WINETRICKS_BIN:-winetricks}" ${wt_flags} "${to_install[@]}" > "${wt_out}" 2>&1
+  ) &
+  local wt_pid=$!
+  
+  local i=0
+  local chars="/-\|"
+  while kill -0 "${wt_pid}" 2>/dev/null; do
+    i=$(( (i+1) % 4 ))
+    printf "\r  %b[PROG]%b  Installing ${desc}... [%c]" "${BLUE}" "${NC}" "${chars:$i:1}"
+    sleep 0.5
+  done
+  wait "${wt_pid}"
+  local wt_status=$?
+  printf "\r"
+
+  if [[ "${wt_status}" -eq 0 ]]; then
     ok_msg "${desc} installed successfully."
   else
     warn_msg "Some components in '${desc}' failed to install — continuing anyway."
+    if [[ "${VERBOSE_MODE:-false}" == "true" ]]; then
+      cat "${wt_out}"
+    fi
   fi
+  rm -f "${wt_out}"
 
   # Wait for wineserver to finish all pending work, then stop it.
   #
@@ -2311,6 +2350,7 @@ main() {
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
+  local WINETRICKS_BIN="winetricks"
 
   # Load saved preferences.
   local controller_pref_file="${GAME_DIR}/.controller_enabled"
@@ -2450,10 +2490,8 @@ main() {
   local maint_wine="wine"
   local maint_server="wineserver"
 
-  # Use --version (pure print, no wineserver spawn) to check the Wine binary is
-  # functional. wineboot --version was used previously but initialises a wineserver
-  # process that grows in memory (the 7 MB/s btop symptom) even before Step 3.
-  if [[ -n "${real_wine_path}" ]] && "${real_wine_path}" --version >/dev/null 2>&1; then
+  # Use the detected Wine if it's functional standalone (not SLR).
+  if [[ -n "${real_wine_path}" ]] && [[ "${_is_slr}" == "false" ]]; then
     # The detected Wine is functional (e.g. GE-Proton or system Wine).
     maint_wine="${real_wine_path}"
     maint_server="${real_wineserver}"
@@ -2463,7 +2501,7 @@ main() {
     if command_exists wine; then
       maint_wine=$(command -v wine)
       maint_server=$(command -v wineserver || echo "wineserver")
-      info_msg "Falling back to system Wine: ${maint_wine}"
+      info_msg "Falling back to system Wine for maintenance: ${maint_wine}"
     fi
   fi
 
@@ -2538,21 +2576,26 @@ main() {
   fi
 
   local -a py_libs=(vdf blake3)
+  local missing_libs=()
   local lib
   for lib in "${py_libs[@]}"; do
-    if PYTHONPATH="${CLUCKERS_PYLIBS}${PYTHONPATH:+:${PYTHONPATH}}" \
+    if ! PYTHONPATH="${CLUCKERS_PYLIBS}${PYTHONPATH:+:${PYTHONPATH}}" \
          python3 -c "import ${lib}" > /dev/null 2>&1; then
-      ok_msg "Python '${lib}' library is already installed."
-    else
-      info_msg "Installing Python '${lib}' library to local profile (showing pip output)..."
-      mkdir -p "${CLUCKERS_PYLIBS}"
-      if ${pip_cmd} install --upgrade --target "${CLUCKERS_PYLIBS}" "${lib}"; then
-        ok_msg "Python '${lib}' installed successfully."
-      else
-        warn_msg "Could not install the Python '${lib}' library. Some features may be limited."
-      fi
+      missing_libs+=("${lib}")
     fi
   done
+
+  if [[ ${#missing_libs[@]} -gt 0 ]]; then
+    info_msg "Installing missing Python libraries: ${missing_libs[*]}..."
+    mkdir -p "${CLUCKERS_PYLIBS}"
+    if ${pip_cmd} install --upgrade --target "${CLUCKERS_PYLIBS}" "${missing_libs[@]}"; then
+      ok_msg "Python libraries installed successfully."
+    else
+      warn_msg "Could not install some Python libraries. Some features may be limited."
+    fi
+  else
+    ok_msg "All required Python libraries are already installed."
+  fi
 
   # Skip heavy steps (Steps 2-6) if we just performed an update.
   if [[ "${skip_heavy_steps}" == "false" ]]; then
