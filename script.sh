@@ -2843,45 +2843,31 @@ EOF
   # --------------------------------------------------------------------------
   step_msg "Step 3 — Initialising Wine prefix..."
 
+  # If we are using Proton, ensure there are no conflicting real files
+  # where Proton expects to place symlinks (e.g. iexplore.exe).
+  # Proton will crash with FileExistsError if it can't create these symlinks.
+  if [[ "${_is_proton}" == "true" ]] && [[ -d "${WINEPREFIX}/drive_c" ]]; then
+    info_msg "Cleaning up existing prefix for Proton upgrade/use..."
+    # Remove real files that should be symlinks in a Proton prefix.
+    # We use a broad list of system files that Proton typically symlinks.
+    find "${WINEPREFIX}/drive_c" -type f \( \
+      -path "*/Internet Explorer/iexplore.exe" -o \
+      -path "*/system32/notepad.exe" -o \
+      -path "*/system32/winhlp32.exe" -o \
+      -path "*/system32/winebrowser.exe" -o \
+      -path "*/system32/wineconsole.exe" -o \
+      -path "*/system32/winedbg.exe" -o \
+      -path "*/system32/winefile.exe" -o \
+      -path "*/system32/winemine.exe" -o \
+      -path "*/system32/regedit.exe" -o \
+      -path "*/system32/cmd.exe" -o \
+      -path "*/system32/control.exe" \
+    \) -not -type l -delete 2>/dev/null || true
+  fi
+
   if [[ -d "${WINEPREFIX}/drive_c" ]]; then
-    ok_msg "Wine prefix already exists at ${WINEPREFIX} — skipping."
+    ok_msg "Wine prefix already exists at ${WINEPREFIX}."
   else
-    info_msg "Creating Wine prefix at ${WINEPREFIX} (this takes ~30 seconds)..."
-    mkdir -p "${WINEPREFIX}"
-
-    # If we are using Proton, it's safer and faster to copy its bundled default_pfx
-    # instead of running wineboot --init (which can hang with some Proton builds).
-    local proton_template=""
-    if [[ "${_is_proton}" == "true" ]]; then
-      # find_wine resolves real_wine_path to something like .../Proton/files/bin/wine
-      local proton_root
-      proton_root="$(dirname "$(dirname "$(dirname "${real_wine_path}")")")"
-      # Steam's Proton uses .../Proton/dist/share/default_pfx or .../Proton/files/share/default_pfx
-      if [[ -d "${proton_root}/dist/share/default_pfx" ]]; then
-        proton_template="${proton_root}/dist/share/default_pfx"
-      elif [[ -d "${proton_root}/files/share/default_pfx" ]]; then
-        proton_template="${proton_root}/files/share/default_pfx"
-      elif [[ -d "${proton_root}/share/default_pfx" ]]; then
-        proton_template="${proton_root}/share/default_pfx"
-      fi
-    fi
-
-    if [[ -n "${proton_template}" ]]; then
-      info_msg "Copying Proton prefix template from ${proton_template}..."
-      cp -r "${proton_template}"/* "${WINEPREFIX}/"
-    else
-      # If we are using Proton, ensure there are no conflicting real files
-      # where Proton expects to place symlinks (e.g. iexplore.exe).
-      # Proton will crash with FileExistsError if it can't create these symlinks.
-      if [[ "${_is_proton}" == "true" ]]; then
-        info_msg "Cleaning up existing prefix for Proton upgrade..."
-        # Remove real files that should be symlinks in a Proton prefix.
-        find "${WINEPREFIX}/drive_c" -type f \( \
-          -path "*/Internet Explorer/iexplore.exe" -o \
-          -path "*/system32/notepad.exe" -o \
-          -path "*/system32/winhlp32.exe" \
-        \) -not -type l -delete 2>/dev/null || true
-      fi
 
       # Suppress Wine GUI dialogs during prefix initialisation:
       #   DISPLAY=""                        — no X window for mono/gecko installers
