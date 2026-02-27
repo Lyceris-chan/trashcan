@@ -193,6 +193,8 @@ readonly STEAM_GRID_URL="${STEAM_CDN_URL}/library_600x900_2x.jpg?t=1739811771"
 readonly STEAM_HERO_URL="${STEAM_CDN_URL}/library_hero_2x.jpg?t=1739811771"
 readonly STEAM_WIDE_URL="${STEAM_CDN_URL}/capsule_616x353.jpg?t=1739811771"
 readonly STEAM_HEADER_URL="${STEAM_CDN_URL}/header.jpg?t=1739811771"
+# community_icon is often best for the desktop shortcut as it's a square logo.
+readonly STEAM_COMMUNITY_ICON_URL="https://shared.fastly.steamstatic.com/community_assets/images/apps/813820/068664cf452a9f2388cf1ccf1f239fc967ff9629.jpg"
 
 readonly STEAM_ASSETS_DIR="${HOME}/.cluckers/assets"
 readonly STEAM_LOGO_PATH="${STEAM_ASSETS_DIR}/logo.png"
@@ -200,6 +202,7 @@ readonly STEAM_GRID_PATH="${STEAM_ASSETS_DIR}/grid.jpg"
 readonly STEAM_HERO_PATH="${STEAM_ASSETS_DIR}/hero.jpg"
 readonly STEAM_WIDE_PATH="${STEAM_ASSETS_DIR}/wide.jpg"
 readonly STEAM_HEADER_PATH="${STEAM_ASSETS_DIR}/header.jpg"
+readonly STEAM_ICON_PATH="${STEAM_ASSETS_DIR}/icon.jpg"
 
 # Directory where the two helper .exe / .dll binaries are stored after setup.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
@@ -364,7 +367,7 @@ get_wine_env_additions() {
   fi
   
   # Include common system library paths as fallback
-  libs="${libs}:/usr/lib64:/usr/lib:/lib64:/lib"
+  libs="${libs}${libs:+:}/usr/lib64:/usr/lib:/lib64:/lib:/usr/lib/x86_64-linux-gnu"
   
   printf "%s|%s|%s" "${bin_dir}" "${libs}" "${wine_path}"
 }
@@ -12597,8 +12600,10 @@ XDLL_B64_EOF
        && curl -sfL -o "${STEAM_GRID_PATH}" "${STEAM_GRID_URL}" \
        && curl -sfL -o "${STEAM_HERO_PATH}" "${STEAM_HERO_URL}" \
        && curl -sfL -o "${STEAM_WIDE_PATH}" "${STEAM_WIDE_URL}" \
-       && curl -sfL -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}"; then
-      cp "${STEAM_LOGO_PATH}" "${ICON_PATH}"
+       && curl -sfL -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" \
+       && curl -sfL -o "${STEAM_ICON_PATH}" "${STEAM_COMMUNITY_ICON_URL}"; then
+      # Prefer the square community icon for the desktop shortcut.
+      cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
       asset_downloaded="true"
       ok_msg "High-quality Steam assets downloaded successfully."
     else
@@ -13243,6 +13248,7 @@ EOF
       STEAM_LOGO_PATH_ENV="${STEAM_LOGO_PATH}" \
       STEAM_WIDE_PATH_ENV="${STEAM_WIDE_PATH}" \
       STEAM_HEADER_PATH_ENV="${STEAM_HEADER_PATH}" \
+      STEAM_ICON_PATH_ENV="${STEAM_ICON_PATH}" \
       python3 - << 'PYEOF'
 """Adds Cluckers Central to Steam as a non-Steam shortcut."""
 
@@ -13318,7 +13324,7 @@ try:
         "AppName":          APP_NAME,
         "Exe":              LAUNCHER,
         "StartDir":         os.path.dirname(LAUNCHER),
-        "icon":             ICON_PATH,
+        "icon":             os.environ.get("STEAM_ICON_PATH_ENV", ICON_PATH),
         "ShortcutPath":     "",
         "LaunchOptions":    "",
         "IsHidden":         0,
@@ -13353,9 +13359,9 @@ try:
         STEAM_LOGO: ["_logo"],  # Clear logo
     }
 
-    # For non-Steam games, Steam sometimes uses the 64-bit AppID for art.
-    # We deploy to both the 32-bit CRC ID and the 64-bit ID to be safe.
-    # 64-bit ID = (unsigned_32bit_id << 32) | 0x02000000
+    # For non-Steam games, Steam uses the 64-bit AppID for art files.
+    # The 64-bit ID is (unsigned_32bit_crc << 32) | 0x02000000.
+    # We deploy to BOTH the 32-bit CRC and the 64-bit ID to be safe.
     long_id = (unsigned_id << 32) | 0x02000000
 
     for src, suffixes in art_map.items():
@@ -13363,12 +13369,23 @@ try:
             continue
         ext = os.path.splitext(src)[1]
         for suffix in suffixes:
+            # Try both short and long IDs
             for aid in [str(unsigned_id), str(long_id)]:
                 dest = os.path.join(grid_dir, f"{aid}{suffix}{ext}")
                 try:
                     shutil.copy2(src, dest)
                 except Exception:
                     pass
+            # Also try with .jpg and .png explicitly if the extension doesn't match
+            # some versions of Steam are picky.
+            for alt_ext in [".jpg", ".png"]:
+                if ext.lower() != alt_ext:
+                    for aid in [str(unsigned_id), str(long_id)]:
+                        dest = os.path.join(grid_dir, f"{aid}{suffix}{alt_ext}")
+                        try:
+                            shutil.copy2(src, dest)
+                        except Exception:
+                            pass
 
     print(f"{_OK} Added Cluckers Central to Steam library (including artwork).")
 except Exception as exc:  # pylint: disable=broad-except
