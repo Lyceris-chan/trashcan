@@ -527,7 +527,7 @@ install_sys_deps() {
     for ad in "${apt_deps[@]}"; do
       if ! is_pkg_installed "apt" "${ad}"; then
         # Avoid duplicates
-        [[ " ${to_install[*]} " =~ " ${ad} " ]] || to_install+=("${ad}")
+        [[ " ${to_install[*]} " == *" ${ad} "* ]] || to_install+=("${ad}")
       fi
     done
   fi
@@ -734,8 +734,6 @@ install_winetricks_multi() {
   # This is a historical naming quirk that Microsoft kept for compatibility.
   # The Visual C++ runtime packages install DLLs into both folders, while DXVK
   # only installs 64-bit DLLs into system32.
-  local sys64="${WINEPREFIX}/drive_c/windows/system32"
-  local syswow="${WINEPREFIX}/drive_c/windows/syswow64"
 
   # Checks whether the key DLL for a given winetricks verb already exists in
   # the Wine prefix. Returns 0 (success/true) if found, 1 (failure/false) if
@@ -2271,7 +2269,7 @@ find_wine() {
   local newest_script=""
   local newest_is_slr="false"
 
-  local d p base major minor ver
+  local d p base major minor
   for d in "${search_dirs[@]}"; do
     if [[ ! -d "${d}" ]]; then continue; fi
 
@@ -2891,7 +2889,6 @@ EOF
         LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
         WINELOADER="${loader_add}" \
         "${maint_server}" -w || true
-    fi
     ok_msg "Wine prefix created."
   fi
 
@@ -12862,7 +12859,6 @@ XDLL_B64_EOF
   mkdir -p "${ICON_DIR}"
   mkdir -p "${STEAM_ASSETS_DIR}"
 
-  local asset_downloaded="false"
   if command_exists curl; then
     info_msg "Downloading high-quality assets from Steam CDN..."
     
@@ -12873,9 +12869,9 @@ XDLL_B64_EOF
         curl ${CURL_FLAGS}f -o "${STEAM_WIDE_PATH}" "${STEAM_WIDE_URL}" || true
         curl ${CURL_FLAGS}f -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" || true
     
-        if curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}"; then      cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
-      asset_downloaded="true"
-      ok_msg "High-quality Steam assets downloaded."
+            if curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}"; then
+              cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
+              ok_msg "High-quality Steam assets downloaded."
     else
       warn_msg "Steam CDN icon unavailable."
     fi
@@ -12943,7 +12939,9 @@ $(
     _env_adds="$(get_wine_env_additions "${real_wine_path}")"
     _bin_add="${_env_adds%%|*}"; _temp="${_env_adds#*|}"
     _lib_add="${_temp%%|*}"; _loader_add="${_env_adds##*|}"
+    # shellcheck disable=SC2016
     printf 'export PATH="%s:${PATH}"\n' "${_bin_add}"
+    # shellcheck disable=SC2016
     printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "${_lib_add}"
     printf 'export WINELOADER="%s"\n' "${_loader_add}"
   fi
@@ -12989,15 +12987,17 @@ $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
   #         SDL_HINT_GAMECONTROLLERCONFIG_FILE ~line 513
   # Community mapping database: https://github.com/gabomdq/SDL_GameControllerDB
   # If the file exists in a standard location we export the path so Wine/SDL picks it up.
-  printf '_sdl_db=""\n'
-  printf 'for _db_path in \\\n'
-  printf '  "\${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
-  printf '  "\${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
-  printf '  "/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt" \\\n'
-  printf '  "/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt"; do\n'
-  printf '  if [[ -f "\${_db_path}" ]]; then _sdl_db="\${_db_path}"; break; fi\n'
-  printf 'done\n'
-  printf '[[ -n "\${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="\${_sdl_db}"\n'
+  cat << 'SDLEOF'
+_sdl_db=""
+for _db_path in \
+  "${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
+  "${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt" \
+  "/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
+  "/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt"; do
+  if [[ -f "${_db_path}" ]]; then _sdl_db="${_db_path}"; break; fi
+done
+[[ -n "${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="${_sdl_db}"
+SDLEOF
 else
   printf 'export WINEDLLOVERRIDES="dxgi=n"\n'
 fi)
