@@ -427,9 +427,9 @@ install_winetricks_pkg() {
   local wt_flags=""
   [[ "${is_auto}" == "true" ]] && wt_flags="-q"
 
-  # 30-minute timeout for heavy installers
+  # Run winetricks
   if WINE="${maint_wine}" WINESERVER="${maint_server}" \
-     timeout 1800s winetricks ${wt_flags} "${pkg}"; then
+     winetricks ${wt_flags} "${pkg}"; then
     ok_msg "${desc} installed."
     # Log the successful installation so we can skip it next time.
     echo "${pkg}" >> "${log}"
