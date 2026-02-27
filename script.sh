@@ -2866,6 +2866,35 @@ EOF
   if [[ -d "${WINEPREFIX}/drive_c" ]]; then
     ok_msg "Wine prefix already exists at ${WINEPREFIX}."
   else
+    info_msg "Creating Wine prefix at ${WINEPREFIX} (this takes ~30 seconds)..."
+    mkdir -p "${WINEPREFIX}"
+
+    # If we are using Proton, it's safer and faster to copy its bundled default_pfx
+    # instead of running wineboot --init (which can hang with some Proton builds).
+    local proton_template=""
+    if [[ "${_is_proton}" == "true" ]]; then
+      # find_wine resolves real_wine_path to something like .../Proton/files/bin/wine
+      local proton_root
+      proton_root="$(dirname "$(dirname "$(dirname "${real_wine_path}")")")"
+      # Steam's Proton uses .../Proton/dist/share/default_pfx or .../Proton/files/share/default_pfx
+      # The AUR proton-ge-custom-bin package uses files/share/default_pfx
+      if [[ -d "${proton_root}/dist/share/default_pfx" ]]; then
+        proton_template="${proton_root}/dist/share/default_pfx"
+      elif [[ -d "${proton_root}/files/share/default_pfx" ]]; then
+        proton_template="${proton_root}/files/share/default_pfx"
+      elif [[ -d "${proton_root}/files/default_pfx" ]]; then
+        proton_template="${proton_root}/files/default_pfx"
+      elif [[ -d "${proton_root}/share/default_pfx" ]]; then
+        proton_template="${proton_root}/share/default_pfx"
+      elif [[ -d "${proton_root}/default_pfx" ]]; then
+        proton_template="${proton_root}/default_pfx"
+      fi
+    fi
+
+    if [[ -n "${proton_template}" ]]; then
+      info_msg "Copying Proton prefix template from ${proton_template}..."
+      cp -r "${proton_template}"/* "${WINEPREFIX}/"
+    else
 
       # Suppress Wine GUI dialogs during prefix initialisation:
       #   DISPLAY=""                        — no X window for mono/gecko installers
@@ -2889,6 +2918,7 @@ EOF
         LD_LIBRARY_PATH="${lib_add}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
         WINELOADER="${loader_add}" \
         "${maint_server}" -w || true
+    fi
     ok_msg "Wine prefix created."
   fi
 
