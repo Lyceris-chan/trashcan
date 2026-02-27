@@ -427,7 +427,7 @@ install_winetricks_pkg() {
   local wt_flags=""
   [[ "${is_auto}" == "true" ]] && wt_flags="-q"
 
-  # 30-minute timeout for heavy installers (vcrun2022, etc.)
+  # 30-minute timeout for heavy installers
   if WINE="${maint_wine}" WINESERVER="${maint_server}" \
      timeout 1800s winetricks ${wt_flags} "${pkg}"; then
     ok_msg "${desc} installed."
@@ -2011,9 +2011,7 @@ main() {
   # --------------------------------------------------------------------------
   # Step 4 — Windows runtime libraries
   #
-  # vcrun2022 is a strict superset of all prior VC++ redistributables —
-  # it satisfies Depots 228983 (VC2010), 228984 (VC2012), and 228988
-  # (VC2019) in one install without conflict warnings from winetricks.
+  # vcrun2010/2012/2019 satisfy the game's Visual C++ redistributable requirements.
   #
   # d3dx9 installs the individual DirectX 9 DLLs (d3dx9_24 through
   # d3dx9_43) that correspond to the DirectX Jun 2010 Redistributable
@@ -2028,17 +2026,10 @@ main() {
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 
   # Packages match verify.go RepairInstructions exactly:
-  #   vcrun2022  — Visual C++ 2010-2022 Redistributable (superset of all prior)
-  #   dxvk       — Vulkan-backed d3d8/d3d9/d3d10/d3d11/dxgi DLLs. Provides
-  #                d3d11.dll checked by verify.go. Also improves performance.
-  #   d3dx11_43  — DirectX 11 helper DLL (d3dx11_43.dll). Explicitly listed
-  #                in verify.go RequiredDLLs. NOT included in dxvk. Missing
-  #                this causes STATUS_DLL_NOT_FOUND (0xC0000135) at startup.
-  #
-  # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
-  # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
-  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${maint_wine}" "${maint_server}" "${auto_mode}"
-  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "vcrun2010"  "Visual C++ 2010 Redistributable"  "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "vcrun2012"  "Visual C++ 2012 Redistributable"  "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "vcrun2019"  "Visual C++ 2019 Redistributable"  "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)" "${maint_wine}" "${maint_server}" "${auto_mode}"
   install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${maint_wine}" "${maint_server}" "${auto_mode}"
 
   # --------------------------------------------------------------------------
