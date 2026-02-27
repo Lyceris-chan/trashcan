@@ -13,6 +13,9 @@
 #    ./cluckers-setup.sh --auto          # skip all prompts, use defaults
 #    ./cluckers-setup.sh --verbose       # show full Wine debug output
 #    ./cluckers-setup.sh --gamescope     # opt-in: enable Gamescope compositor (-g)
+#                                        # Gamescope is a specialized window manager
+#                                        # that provides better performance and
+#                                        # features like upscaling and HDR.
 #    ./cluckers-setup.sh --steam-deck    # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller    # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --show-movies   # opt-out: show intro movies          (-m)
@@ -26,11 +29,11 @@
 #    --uninstall  (full word only, no short alias — removes everything)
 #
 #  UPDATE  (--update / -u)
-#    Checks the update server for a newer game version. Update
-#    detection compares the local GameVersion.dat BLAKE3 hash against the
-#    server's value. If they differ, the new game zip is downloaded with
-#    resume support, verified, and extracted in place. All setup steps
-#    (Wine, launcher, etc.) are skipped.
+#    Checks the update server for a newer game version. Update detection
+#    compares the local GameVersion.dat BLAKE3 hash (a unique file identifier)
+#    against the server's value. If they differ, the new game zip is downloaded
+#    with resume support, verified, and extracted in place. All setup steps
+#    (Wine compatibility layer, launcher, etc.) are skipped.
 #
 #    Combine with -d to also re-apply Deck patches afterward:
 #      ./cluckers-setup.sh --update --steam-deck
@@ -38,6 +41,10 @@
 #  VERSION PINNING  (--update only)
 #    Pass GAME_VERSION=x.x.x.x to target a specific build instead of latest:
 #      GAME_VERSION=0.36.2100.0 ./cluckers-setup.sh --update
+#
+#    Version pinning allows users to lock the game to a specific version for
+#    stability and reproducibility (useful when a newer version breaks mods or
+#    known functionality).
 #
 #    The chosen version is written to ~/.cluckers/game/.pinned_version so
 #    subsequent plain `./cluckers-setup.sh --update` runs use the same version
@@ -50,12 +57,14 @@
 #    Pass --steam-deck / -d or --controller / -c to apply game patches after
 #    the game is downloaded. These flags ensure controllers work reliably:
 #      • DefaultInput.ini / RealmInput.ini — removes phantom mouse-axis
-#        counters to prevent the gamepad switching to KB/M under Wine
+#        counters to prevent the gamepad switching to keyboard/mouse mode
+#        under Wine.
 #
 #    The --steam-deck / -d flag additionally applies Deck-specific tweaks:
-#      • RealmSystemSettings.ini  — forced fullscreen at 1280×800
-#      • controller_neptune_config.vdf — deploys the custom Deck button layout
-#        to your Steam controller config directory (preserves any existing one)
+#      • RealmSystemSettings.ini — forced fullscreen at 1280×800
+#      • controller_neptune_config.vdf — deploys the custom Steam Deck button
+#        layout to your Steam controller config directory (preserves any
+#        existing one). VDF is Valve's text-based configuration format.
 #      • Gamescope is not used (SteamOS manages its own compositor)
 #
 #  INTRO MOVIES
@@ -121,8 +130,9 @@ GAME_VERSION="${GAME_VERSION:-auto}"
 #
 # Steam Deck users: these args are NOT used when --steam-deck / -d is passed
 # because SteamOS runs its own Gamescope session automatically.
-GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 \
-  --adaptive-sync --borderless"
+# --force-grab-cursor is included because it fixes the mouse bugging out
+# (stuck in a corner or invisible) on many Desktop Environments and Distros.
+GAMESCOPE_ARGS="gamescope -f --force-grab-cursor -W 1920 -H 1080 -r 240 --adaptive-sync --borderless"
 
 # ==============================================================================
 #  Constants  (readonly — cannot be changed at runtime)
@@ -298,9 +308,14 @@ command_exists() { command -v "$1" > /dev/null 2>&1; }
 # Replicates the version check in:
 # https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 #
+# BLAKE3 is a cryptographic hash function (a unique file fingerprint).
+#
 # Arguments:
 #   $1 - dat_path_rel: Relative path to GameVersion.dat.
 #   $2 - dat_blake3: Expected BLAKE3 hash from the server.
+#
+# Returns:
+#   0 if up to date, 1 otherwise.
 is_game_up_to_date() {
   local dat_path_rel="$1"
   local dat_blake3="$2"
@@ -1238,10 +1253,14 @@ parallel_download() {
 # Checks for a newer game version and downloads it if available.
 # Skips all setup steps — only updates the game files in GAME_DIR.
 # Optionally applies game patches (Steam Deck or Controller) afterward.
+# Uses global variables: GAME_DIR, UPDATER_URL, GAME_VERSION.
 #
 # Update detection: fetches version.json from the update server, reads the
 # local GameVersion.dat, computes its BLAKE3 hash, and compares it against
 # the server's value. A mismatch means an update is needed.
+# BLAKE3 is a cryptographic fingerprinting algorithm (a fast hash function that
+# produces a unique file identifier). If even one byte changes, the entire hash
+# changes. We use it to verify the downloaded file wasn't corrupted or tampered with.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/game/version.go
 #
 # Version pinning:
@@ -1249,13 +1268,17 @@ parallel_download() {
 #   The pin is written to ${GAME_DIR}/.pinned_version so subsequent plain
 #   `./cluckers-setup.sh --update` runs remember the chosen version without
 #   needing GAME_VERSION set again. Clear the file to return to auto-update.
+#   Version pinning allows users to lock the game to a specific version for
+#   stability and reproducibility (useful when a newer version breaks mods or
+#   known functionality).
 #
-# Globals:
-#   GAME_DIR, UPDATER_URL, GAME_VERSION
 # Arguments:
 #   $1 - steam_deck_flag: "true" | "false"
 #   $2 - controller_flag: "true" | "false"
 #   $3 - skip_movies_flag: "true" | "false"
+#
+# Returns:
+#   0 on success; exits with error via error_exit() on failure.
 run_update() {
   local -r steam_deck_flag="$1"
   local -r controller_flag="$2"
@@ -1291,7 +1314,9 @@ run_update() {
   info_msg "Latest version on server: ${server_version}"
 
   # ---- Version pinning -------------------------------------------------------
-  # Priority order (highest first):
+  # Version pinning allows users to lock the game to a specific version for
+  # stability and reproducibility (useful when a newer version breaks mods or
+  # known functionality). Priority order (highest first):
   #   1. GAME_VERSION env var set by the user for this run.
   #   2. .pinned_version file written by a previous pinned --update run.
   #   3. "auto" — use latest from server.
@@ -1365,9 +1390,10 @@ run_update() {
 
   ok_msg "Download complete."
 
-  # ---- BLAKE3 verification ---------------------------------------------------
+  # ---- BLAKE3 hash verification (file integrity check) ----------------------
   if [[ -n "${zip_blake3}" ]]; then
     info_msg "Verifying BLAKE3 integrity of game zip..."
+    # Verify downloaded zip integrity using BLAKE3 hash comparison against server's value.
     local actual_blake3
     actual_blake3=$(python3 - "${zip_path}" << 'ZIPBLAKE3EOF'
 import sys
@@ -1427,6 +1453,9 @@ ZIPBLAKE3EOF
 # Checks DMI board vendor, /etc/os-release, and the default Deck home directory.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/gui/deck_linux.go
 #
+# Arguments:
+#   None.
+#
 # Returns:
 #   0 if Steam Deck, 1 otherwise.
 is_steam_deck() {
@@ -1457,17 +1486,25 @@ is_steam_deck() {
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
 #
 # Patches applied:
-#   RealmSystemSettings.ini  — forces fullscreen at 1280x800 (Deck only).
+#   RealmSystemSettings.ini — forces fullscreen at 1280x800 (Deck only).
 #   DefaultInput.ini / RealmInput.ini — removes phantom mouse-axis counters
 #     (Count bXAxis / Count bYAxis) to prevent the controller from switching
-#     to keyboard/mouse mode under Wine.
+#     to keyboard/mouse mode under Wine. Wine is a compatibility layer that
+#     allows Windows games to run on Linux by translating Windows API calls.
+#     Under Wine, controller input needs special patches to work correctly.
 #   controller_neptune_config.vdf — Steam Deck button layout (best-effort, Deck only).
+#     controller_neptune_config.vdf is a Steam Deck controller configuration file
+#     (VDF is Valve's text-based configuration format for Steam) that defines
+#     custom button mappings for this game.
 #
 # Arguments:
 #   $1 - game_dir: absolute path to the game data directory (GAME_DIR).
 #   $2 - steam_deck_flag: "true" | "false"
 #   $3 - controller_flag: "true" | "false"
 #   $4 - skip_movies_flag: "true" | "false"
+#
+# Returns:
+#   0 on success; 1 if required config directories not found.
 apply_game_patches() {
   local game_dir="$1"
   local -r steam_deck_flag="$2"
@@ -1475,6 +1512,14 @@ apply_game_patches() {
   local -r skip_movies_flag="$4"
   local config_dir="${game_dir}/Realm-Royale/RealmGame/Config"
   local engine_config_dir="${game_dir}/Realm-Royale/Engine/Config"
+
+  # Ensure the game's config directories exist before attempting to patch.
+  if [[ ! -d "${config_dir}" || ! -d "${engine_config_dir}" ]]; then
+    warn_msg "Game configuration directories not found in ${game_dir}"
+    warn_msg "  (Run setup again after downloading the game.)"
+    return 1
+  fi
+
   local ini
 
   # List all applicable patches based on preferences
@@ -2109,6 +2154,9 @@ find_wine() {
 #
 # Arguments:
 #   "$@" - Flags passed to the script.
+#
+# Returns:
+#   0 on success; exits with error via error_exit() on failure.
 main() {
   local verbose="false"
   local auto_mode="false"
@@ -2199,6 +2247,23 @@ main() {
   else
     export WINEDEBUG="-all"
     export VERBOSE_MODE="false"
+  fi
+
+  # --------------------------------------------------------------------------
+  # Gamescope Configuration
+  # --------------------------------------------------------------------------
+  if [[ "${use_gamescope}" == "true" ]]; then
+    printf "Gamescope is enabled. We use '--force-grab-cursor' because it fixes\n"
+    printf "the mouse bugging out (stuck/invisible) on many Linux setups.\n\n"
+    printf "Current flags: %s\n" "${GAMESCOPE_ARGS}"
+    printf "Press ENTER to keep these, or type new flags: "
+    local _new_gs_args=""
+    read -r _new_gs_args
+    if [[ -n "${_new_gs_args}" ]]; then
+      GAMESCOPE_ARGS="${_new_gs_args}"
+      ok_msg "Gamescope flags updated to: ${GAMESCOPE_ARGS}"
+    fi
+    printf "\n"
   fi
 
   # Auto-detect Steam Deck. If running on Deck hardware but -d was not passed,
@@ -2801,7 +2866,7 @@ BLAKE3EOF
   # SOURCE CODE: shm_launcher.c (https://github.com/0xc0re/cluckers/blob/master/tools/shm_launcher.c)
   # ==============================================================================
 #   /*
-#    * shm_launcher.c - Creates a named shared memory section with content bootstrap
+#    * shm_launcher.c — Creates a named shared memory section with content bootstrap
 #    * data, then launches the game executable. The game expects to find the bootstrap
 #    * via OpenFileMapping() using the name passed in -content_bootstrap_shm=.
 #    *
@@ -3065,7 +3130,7 @@ BLAKE3EOF
 #       proxy_init();
 #       if (logf) { fprintf(logf, "XInputEnable(%d) called at n=%d\n", e, n); fflush(logf); }
 #       if (e == FALSE) {
-#           if (logf) { fprintf(logf, "BLOCKED XInputEnable(FALSE) - preventing UE3 ServerTravel input loss\n"); fflush(logf); }
+#           if (logf) { fprintf(logf, "BLOCKED XInputEnable(FALSE) — preventing UE3 ServerTravel input loss\n"); fflush(logf); }
 #           return;
 #       }
 #       if (pEnable) pEnable(e);
@@ -3077,7 +3142,7 @@ BLAKE3EOF
 #
 #   BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID res) {
 #       (void)h; (void)res;
-#       /* Do NOT call proxy_init here - LoadLibrary inside DllMain causes loader lock deadlock */
+#       /* Do NOT call proxy_init here — LoadLibrary inside DllMain causes loader lock deadlock */
 #       if (reason == 1) {
 #           /* DLL_PROCESS_ATTACH: initialize critical section for thread-safe proxy_init */
 #           InitializeCriticalSection(&g_initLock);
