@@ -710,8 +710,12 @@ install_winetricks_multi() {
   #   (.NET runtime) and Gecko (Internet Explorer engine) when the prefix is
   #   first touched. Wine tries to download these automatically, but we don't
   #   need them for this game and they add several minutes of download time.
+  # Use env to pass variables to winetricks without re-assigning them in the
+  # current shell. Inline VAR=value syntax (VAR=x cmd) is rejected by bash
+  # when VAR is declared readonly, even though it would only be a temporary
+  # assignment for the child process. env sidesteps this restriction entirely.
   # shellcheck disable=SC2086
-  if WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
+  if env WINEPREFIX="${WINEPREFIX}" WINE="${maint_wine}" WINESERVER="${maint_server}" \
      DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
      winetricks ${wt_flags} "${to_install[@]}"; then
     ok_msg "${desc} installed successfully."
@@ -2451,11 +2455,15 @@ main() {
       # Suppress Wine GUI dialogs during prefix initialisation:
       #   DISPLAY=""                        — no X window for mono/gecko installers
       #   WINEDLLOVERRIDES=mscoree,mshtml=  — skip .NET and IE installers
-      DISPLAY="" WINEDLLOVERRIDES="mscoree,mshtml=" \
+      # env is used instead of inline VAR=value syntax because WINEPREFIX is
+      # declared readonly and bash rejects inline re-assignment of readonly vars.
+      env WINEPREFIX="${WINEPREFIX}" DISPLAY="" \
+        WINEDLLOVERRIDES="mscoree,mshtml=" \
         WINE="${maint_wine}" WINESERVER="${maint_server}" \
         "${maint_wine}" wineboot --init || true
       # Stabilize the prefix — wait for all Wine children to exit cleanly.
-      WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" "${maint_server}" -w || true
+      env WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
+        "${maint_server}" -w || true
     fi
     ok_msg "Wine prefix created."
   fi
@@ -2528,10 +2536,10 @@ main() {
     #         (options.disable_hidraw ~line 518, options.disable_sdl ~line 541)
     local winebus_key
     winebus_key="HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\WineBus"
-    DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
+    env DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
       "${maint_wine}" reg add "${winebus_key}" \
       /v DisableHidraw /t REG_DWORD /d 1 /f 2>/dev/null || true
-    DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
+    env DISPLAY="" WINEPREFIX="${WINEPREFIX}" WINESERVER="${maint_server}" \
       "${maint_wine}" reg add "${winebus_key}" \
       /v EnableSDL /t REG_DWORD /d 1 /f 2>/dev/null || true
     # Wait for wineserver to finish processing registry writes before continuing.
