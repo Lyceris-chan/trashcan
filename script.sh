@@ -183,6 +183,17 @@ readonly GAME_EXE_REL="Realm-Royale/Binaries/Win64/ShippingPC-RealmGameNoEditor.
 # removing Steam non-Steam-game shortcuts so the correct shortcut is found.
 # Verify: https://store.steampowered.com/app/813820/Realm_Royale_Reforged/
 readonly REALM_ROYALE_APPID="813820"
+readonly STEAM_CDN_URL="https://steamcdn-a.akamaihd.net/steam/apps/${REALM_ROYALE_APPID}"
+
+# High-quality assets from Steam for shortcuts and the Steam library.
+readonly STEAM_LOGO_URL="${STEAM_CDN_URL}/logo.png"
+readonly STEAM_GRID_URL="${STEAM_CDN_URL}/library_600x900_2x.jpg"
+readonly STEAM_HERO_URL="${STEAM_CDN_URL}/library_hero.jpg"
+
+readonly STEAM_ASSETS_DIR="${HOME}/.cluckers/assets"
+readonly STEAM_LOGO_PATH="${STEAM_ASSETS_DIR}/logo.png"
+readonly STEAM_GRID_PATH="${STEAM_ASSETS_DIR}/grid.jpg"
+readonly STEAM_HERO_PATH="${STEAM_ASSETS_DIR}/hero.jpg"
 
 # Directory where the two helper .exe / .dll binaries are stored after setup.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
@@ -12529,53 +12540,77 @@ XDLL_B64_EOF
   # If icoutils is missing the script offers to install it; if that also fails
   # the game still works but will show a generic Wine icon.
   # --------------------------------------------------------------------------
-  step_msg "Step 7 — Extracting desktop icon..."
+  # Step 7 — Downloading high-quality game assets
+  #
+  # Fetches high-quality icons, grid art, and hero images from Steam's CDN.
+  # These are used for both the desktop shortcut and the Steam non-Steam game
+  # entry for a professional look.
+  # --------------------------------------------------------------------------
+  step_msg "Step 7 — Downloading game assets..."
 
   mkdir -p "${ICON_DIR}"
+  mkdir -p "${STEAM_ASSETS_DIR}"
 
-  if [[ -f "${ICON_PATH}" ]]; then
-    ok_msg "Icon already extracted — skipping."
-  elif command_exists wrestool && command_exists icotool; then
-    local game_exe_for_icon="${GAME_DIR}/${GAME_EXE_REL}"
-    info_msg "Extracting icon from game executable..."
-    local ico_tmp
-    ico_tmp=$(mktemp --suffix=.ico)
-    if wrestool -x --type=14 -o "${ico_tmp}" "${game_exe_for_icon}" 2>/dev/null \
-        && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp}" 2>/dev/null; then
-      ok_msg "Icon extracted to ${ICON_PATH}"
+  local asset_downloaded="false"
+  if command_exists curl; then
+    info_msg "Downloading high-quality assets from Steam CDN..."
+    if curl -sfL -o "${STEAM_LOGO_PATH}" "${STEAM_LOGO_URL}" \
+       && curl -sfL -o "${STEAM_GRID_PATH}" "${STEAM_GRID_URL}" \
+       && curl -sfL -o "${STEAM_HERO_PATH}" "${STEAM_HERO_URL}"; then
+      cp "${STEAM_LOGO_PATH}" "${ICON_PATH}"
+      asset_downloaded="true"
+      ok_msg "High-quality Steam assets downloaded successfully."
     else
-      warn_msg "Icon extraction failed — using generic icon."
+      warn_msg "Steam CDN assets unavailable — falling back to executable extraction."
     fi
-    rm -f "${ico_tmp}"
-  else
-    if [[ "${auto_mode}" == "false" ]]; then
-      printf "\n  icoutils is not installed (needed to extract the game icon).\n"
-      printf "  Install command for your distro:\n"
-      case "${pkg_mgr}" in
-        apt)    printf "    sudo apt install icoutils\n" ;;
-        pacman) printf "    sudo pacman -S icoutils\n" ;;
-        dnf)    printf "    sudo dnf install icoutils\n" ;;
-        zypper) printf "    sudo zypper install icoutils\n" ;;
-      esac
-      printf "  Install now? [y/N] "
-      local answer=""
-      read -r answer
-      if [[ "${answer}" =~ ^[Yy]$ ]]; then
-        install_icoutils "${pkg_mgr}"
-        local ico_tmp2
-        ico_tmp2=$(mktemp --suffix=.ico)
-        if wrestool -x --type=14 -o "${ico_tmp2}" "${game_exe_for_icon}" 2>/dev/null \
-          && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp2}" 2>/dev/null; then
-          ok_msg "Icon extracted."
-        else
-          warn_msg "Extraction still failed — using generic icon."
-        fi
-        rm -f "${ico_tmp2}"
+  fi
+
+  if [[ "${asset_downloaded}" == "false" ]]; then
+    if [[ -f "${ICON_PATH}" ]]; then
+      ok_msg "Icon already exists — skipping extraction."
+    elif command_exists wrestool && command_exists icotool; then
+      local game_exe_for_icon="${GAME_DIR}/${GAME_EXE_REL}"
+      info_msg "Extracting icon from game executable..."
+      local ico_tmp
+      ico_tmp=$(mktemp --suffix=.ico)
+      if wrestool -x --type=14 -o "${ico_tmp}" "${game_exe_for_icon}" 2>/dev/null \
+          && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp}" 2>/dev/null; then
+        ok_msg "Icon extracted to ${ICON_PATH}"
       else
-        warn_msg "Skipping icon extraction — generic icon will be used."
+        warn_msg "Icon extraction failed — using generic icon."
       fi
+      rm -f "${ico_tmp}"
     else
-      warn_msg "icoutils not installed — skipping icon extraction (auto mode)."
+      # ... [icoutils manual install block continues below] ...
+      if [[ "${auto_mode}" == "false" ]]; then
+        printf "\n  icoutils is not installed (needed to extract the game icon).\n"
+        printf "  Install command for your distro:\n"
+        case "${pkg_mgr}" in
+          apt)    printf "    sudo apt install icoutils\n" ;;
+          pacman) printf "    sudo pacman -S icoutils\n" ;;
+          dnf)    printf "    sudo dnf install icoutils\n" ;;
+          zypper) printf "    sudo zypper install icoutils\n" ;;
+        esac
+        printf "  Install now? [y/N] "
+        local answer=""
+        read -r answer
+        if [[ "${answer}" =~ ^[Yy]$ ]]; then
+          install_icoutils "${pkg_mgr}"
+          local ico_tmp2
+          ico_tmp2=$(mktemp --suffix=.ico)
+          if wrestool -x --type=14 -o "${ico_tmp2}" "${game_exe_for_icon}" 2>/dev/null \
+            && icotool -x --index=1 -o "${ICON_PATH}" "${ico_tmp2}" 2>/dev/null; then
+            ok_msg "Icon extracted."
+          else
+            warn_msg "Extraction still failed — using generic icon."
+          fi
+          rm -f "${ico_tmp2}"
+        else
+          warn_msg "Skipping icon extraction — generic icon will be used."
+        fi
+      else
+        warn_msg "icoutils not installed — skipping icon extraction (auto mode)."
+      fi
     fi
   fi
 
@@ -13157,11 +13192,15 @@ EOF
       LAUNCHER_ENV="${LAUNCHER_SCRIPT}" \
       ICON_PATH_ENV="${ICON_PATH}" \
       APP_NAME_ENV="${APP_NAME}" \
+      STEAM_GRID_PATH_ENV="${STEAM_GRID_PATH}" \
+      STEAM_HERO_PATH_ENV="${STEAM_HERO_PATH}" \
+      STEAM_LOGO_PATH_ENV="${STEAM_LOGO_PATH}" \
       python3 - << 'PYEOF'
 """Adds Cluckers Central to Steam as a non-Steam shortcut."""
 
 import binascii
 import os
+import shutil
 import time
 
 import vdf  # pip install vdf
@@ -13170,6 +13209,9 @@ USER_CONFIG_DIR = os.environ["USER_CONFIG_DIR"]
 LAUNCHER        = os.environ["LAUNCHER_ENV"]
 ICON_PATH       = os.environ["ICON_PATH_ENV"]
 APP_NAME        = os.environ["APP_NAME_ENV"]
+STEAM_GRID      = os.environ["STEAM_GRID_PATH_ENV"]
+STEAM_HERO      = os.environ["STEAM_HERO_PATH_ENV"]
+STEAM_LOGO      = os.environ["STEAM_LOGO_PATH_ENV"]
 
 _OK   = "  [\033[0;32m OK \033[0m]"
 _WARN = "  [\033[1;33mWARN\033[0m]"
@@ -13243,7 +13285,31 @@ try:
 
     with open(shortcuts_path, "wb") as fh:
         vdf.binary_dump(shortcuts, fh)
-    print(f"{_OK} Added Cluckers Central to Steam library.")
+
+    # -- Steam Library Artwork: grid/hero/logo ------------------------------
+    grid_dir = os.path.join(USER_CONFIG_DIR, "..", "grid")
+    os.makedirs(grid_dir, exist_ok=True)
+
+    # Mapping of library art types to their respective files and suffixes.
+    # Steam looks for files named <appid><suffix> in the grid/ directory.
+    art_map = {
+        STEAM_GRID: ["", "p"],      # Vertical grid and portrait
+        STEAM_HERO: ["_hero"],      # Hero background
+        STEAM_LOGO: ["_logo"],      # Clear logo
+    }
+
+    for src, suffixes in art_map.items():
+        if not os.path.exists(src):
+            continue
+        for suffix in suffixes:
+            dest_ext = os.path.splitext(src)[1]
+            dest = os.path.join(grid_dir, f"{grid_appid}{suffix}{dest_ext}")
+            try:
+                shutil.copy2(src, dest)
+            except Exception:
+                pass
+
+    print(f"{_OK} Added Cluckers Central to Steam library (including artwork).")
 except Exception as exc:  # pylint: disable=broad-except
     print(f"{_WARN} Could not update shortcuts.vdf: {exc}")
 
