@@ -328,6 +328,7 @@ install_winetricks_pkg() {
   local -r desc="$2"
   local -r maint_wine="${3:-wine}"
   local -r maint_server="${4:-wineserver}"
+  local -r is_auto="${5:-false}"
   local -r log="${WINEPREFIX}/winetricks.log"
 
   if [[ -f "${log}" ]] && grep -qw "${pkg}" "${log}" 2>/dev/null; then
@@ -339,12 +340,17 @@ install_winetricks_pkg() {
   # Ensure no orphaned wineservers are running before winetricks.
   WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
   
-  if WINE="${maint_wine}" WINESERVER="${maint_server}" winetricks -q "${pkg}"; then
+  local wt_flags=""
+  [[ "${is_auto}" == "true" ]] && wt_flags="-q"
+
+  # 30-minute timeout for heavy installers (vcrun2022, etc.)
+  if WINE="${maint_wine}" WINESERVER="${maint_server}" \
+     timeout 1800s winetricks ${wt_flags} "${pkg}"; then
     ok_msg "${desc} installed."
     # Log the successful installation so we can skip it next time.
     echo "${pkg}" >> "${log}"
   else
-    warn_msg "${pkg} install failed — continuing anyway."
+    warn_msg "${pkg} install failed or timed out — continuing anyway."
   fi
 
   # Cleanup after winetricks.
@@ -1959,9 +1965,9 @@ main() {
   #
   # Note: d3dx9 is intentionally omitted. The game's DX9 render path is not
   # used (it runs DX11 via -dx11 flag) and d3dx9_* are not in verify.go.
-  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${maint_wine}" "${maint_server}"
-  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${maint_wine}" "${maint_server}"
-  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${maint_wine}" "${maint_server}"
+  install_winetricks_pkg "vcrun2022"  "Visual C++ 2010-2022 Redistributable" "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "dxvk"       "DXVK (Vulkan-backed DirectX 11)"       "${maint_wine}" "${maint_server}" "${auto_mode}"
+  install_winetricks_pkg "d3dx11_43"  "DirectX 11 helper DLL (d3dx11_43.dll)" "${maint_wine}" "${maint_server}" "${auto_mode}"
 
   # --------------------------------------------------------------------------
   # Step 5 — Download and verify game files
