@@ -2305,7 +2305,7 @@ find_wine() {
           can_run="true"
           current_is_slr="true"
         fi
-        rm -rf "${check_pfx}"
+        rm -rf "${check_pfx}" 2>/dev/null || true
 
         if [[ "${can_run}" == "true" ]]; then
           # Try to extract version for GE-Proton (e.g., GE-Proton9-20)
