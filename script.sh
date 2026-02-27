@@ -892,8 +892,8 @@ install_winetricks_multi() {
     current_lines=$(wc -l < "${WINEPREFIX}/winetricks.log" 2>/dev/null || echo 0)
     completed=$(( current_lines - lines_before ))
     # Clamp completed to total.
-    (( completed > total )) && completed=${total}
-    (( completed < 0 )) && completed=0
+    if (( completed > total )); then completed=${total}; fi
+    if (( completed < 0 )); then completed=0; fi
     
     # Guard against division by zero if total is somehow 0.
     local percent=0
