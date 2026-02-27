@@ -333,8 +333,13 @@ get_wine_env_additions() {
   local wine_path="$1"
   local bin_dir
   local root_dir
-  bin_dir=$(readlink -f "$(dirname "${wine_path}")")
-  root_dir=$(readlink -f "$(dirname "${bin_dir}")")
+  
+  if [[ "${wine_path}" != /* ]]; then
+    wine_path=$(command -v "${wine_path}" 2>/dev/null || echo "${wine_path}")
+  fi
+  
+  bin_dir=$(readlink -f "$(dirname "${wine_path}")" 2>/dev/null || dirname "${wine_path}")
+  root_dir=$(readlink -f "$(dirname "${bin_dir}")" 2>/dev/null || dirname "${bin_dir}")
   
   local libs=""
   local ld
@@ -354,10 +359,10 @@ get_wine_env_additions() {
     fi
   done
   
-  # Proton 'files' layout check (covers both Steam and custom builds)
+  # Proton 'files' layout check
   if [[ "${bin_dir}" == */files/bin ]]; then
      local parent_root
-     parent_root=$(readlink -f "$(dirname "${root_dir}")")
+     parent_root=$(readlink -f "$(dirname "${root_dir}")" 2>/dev/null || dirname "${root_dir}")
      for ld in "${lib_dirs[@]}"; do
        if [[ -d "${parent_root}/${ld}" ]]; then
          libs="${libs}${libs:+:}${parent_root}/${ld}"
@@ -365,7 +370,7 @@ get_wine_env_additions() {
      done
   fi
   
-  # Include common system library paths as fallback
+  # Standard system fallbacks
   libs="${libs}${libs:+:}/usr/lib64:/usr/lib:/lib64:/lib:/usr/lib/x86_64-linux-gnu"
   
   printf "%s|%s|%s" "${bin_dir}" "${libs}" "${wine_path}"
@@ -2146,7 +2151,7 @@ find_wine() {
         check_exe="${p}/bin/wine64"
       fi
 
-      if [[ -n "${check_exe}" ]]; then
+      if [[ -n "${check_exe}" ]] && [[ -x "${check_exe}" ]]; then
         base=$(basename "${p}")
         
         # Test if the Wine binary can actually run a simple command.
@@ -12719,14 +12724,14 @@ set -euo pipefail
 # Set PATH and LD_LIBRARY_PATH to include Wine's internal libraries and
 # binaries so it can find essential DLLs like kernel32.dll even when run
 # outside of Steam. We prepend them to any existing paths.
-_env_adds="$(get_wine_env_additions "${real_wine_path}")"
-_bin_add="\${_env_adds%%|*}"
-_temp="\${_env_adds#*|}"
-_lib_add="\${_temp%%|*}"
-_loader_add="\${_env_adds##*|}"
-export PATH="\${_bin_add}:\${PATH}"
-export LD_LIBRARY_PATH="\${_lib_add}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
-export WINELOADER="\${_loader_add}"
+$(
+  _env_adds="$(get_wine_env_additions "${real_wine_path}")"
+  _bin_add="${_env_adds%%|*}"; _temp="${_env_adds#*|}"
+  _lib_add="${_temp%%|*}"; _loader_add="${_env_adds##*|}"
+  printf 'export PATH="%s:${PATH}"\n' "${_bin_add}"
+  printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "${_lib_add}"
+  printf 'export WINELOADER="%s"\n' "${_loader_add}"
+)
 
 export WINEPREFIX="${WINEPREFIX}"
 export WINEARCH="win64"
@@ -13365,14 +13370,17 @@ try:
     }
 
     # For non-Steam games, Steam uses various IDs for filenames in grid/.
-    # 1. The CRC32 of (exe+name) - used for vertical grid 'p' and landscape.
-    # 2. The CRC32 with high bit set - sometimes used.
-    # 3. The 64-bit AppID - (unsigned_32bit_crc << 32) | 0x02000000.
+    # We try all of them:
+    # 1. Standard 32-bit CRC (unsigned)
+    # 2. Signed 32-bit CRC (sometimes used)
+    # 3. 64-bit AppID (Modern Steam)
+    # 4. 32-bit CRC with high bit cleared (Legacy)
     crc_unsigned = binascii.crc32((LAUNCHER + APP_NAME).encode("utf-8")) & 0xFFFFFFFF
     crc_signed   = (crc_unsigned | 0x80000000) & 0xFFFFFFFF
     long_id      = (crc_unsigned << 32) | 0x02000000
+    legacy_id    = (crc_unsigned & 0x7FFFFFFF)
 
-    potential_ids = [str(crc_unsigned), str(crc_signed), str(long_id)]
+    potential_ids = [str(crc_unsigned), str(crc_signed), str(long_id), str(legacy_id)]
 
     for src, suffixes in art_map.items():
         if not os.path.exists(src):
@@ -13380,20 +13388,13 @@ try:
         ext = os.path.splitext(src)[1]
         for suffix in suffixes:
             for aid in potential_ids:
-                dest = os.path.join(grid_dir, f"{aid}{suffix}{ext}")
-                try:
-                    shutil.copy2(src, dest)
-                except Exception:
-                    pass
-            # Also try with .jpg and .png explicitly if the extension doesn't match
-            for alt_ext in [".jpg", ".png"]:
-                if ext.lower() != alt_ext:
-                    for aid in potential_ids:
-                        dest = os.path.join(grid_dir, f"{aid}{suffix}{alt_ext}")
-                        try:
-                            shutil.copy2(src, dest)
-                        except Exception:
-                            pass
+                # Try source extension and common overrides (.jpg, .png)
+                for final_ext in [ext, ".jpg", ".png"]:
+                    dest = os.path.join(grid_dir, f"{aid}{suffix}{final_ext}")
+                    try:
+                        shutil.copy2(src, dest)
+                    except Exception:
+                        pass
 
     print(f"{_OK} Added Cluckers Central to Steam library (including artwork).")
 except Exception as exc:  # pylint: disable=broad-except
