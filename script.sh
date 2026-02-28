@@ -5,13 +5,22 @@
 #  Installs Wine, Windows libraries, and the game. Handles authentication
 #  directly via the Project Crown gateway API (the server that manages your
 #  account and game content — no Windows launcher needed).
-#  Optionally configures Steam integration.
+#  Optionally configures Steam integration and Gamescope.
 #
 #  USAGE
 #    chmod +x cluckers-setup.sh          # make executable (first time only)
 #    ./cluckers-setup.sh                 # interactive install (keyboard/mouse)
 #    ./cluckers-setup.sh --auto          # skip all prompts, use defaults
 #    ./cluckers-setup.sh --verbose       # show full Wine debug output
+#    ./cluckers-setup.sh --gamescope              # opt-in: enable Gamescope compositor (-g)
+#                                                 # Gamescope is a specialized window manager
+#                                                 # that provides better performance and
+#                                                 # features like upscaling and HDR.
+#    ./cluckers-setup.sh --gamescope-with-controller  # opt-in: Gamescope + controller support (-gc)
+#                                                 # Combines --gamescope and --controller in one
+#                                                 # flag. Ideal for couch/TV setups where you
+#                                                 # want the Gamescope compositor AND a gamepad.
+#                                                 # Also triggered when both -g and -c are passed.
 #    ./cluckers-setup.sh --steam-deck             # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller             # opt-in: enable controller support   (-c)
 #    ./cluckers-setup.sh --update                 # check for game update       (-u)
@@ -19,7 +28,9 @@
 #    ./cluckers-setup.sh --help                   # show this help message      (-h)
 #
 #  SHORT FLAGS
-#    -a  auto    -v  verbose    -d  steam-deck    -c  controller    -u  update    -h  help
+#    -a  auto    -v  verbose    -g  gamescope    -gc  gamescope-with-controller
+#    -d  steam-deck    -c  controller    -u  update    -h  help
+#    Passing both -g and -c together is the same as -gc (auto-detected).
 #    --uninstall  (full word only, no short alias — removes everything)
 #
 #  UPDATE  (--update / -u)
@@ -59,6 +70,13 @@
 #      • controller_neptune_config.vdf — deploys the custom Steam Deck button
 #        layout to your Steam controller config directory (preserves any
 #        existing one). VDF is Valve's text-based configuration format.
+#      • Gamescope is not used (SteamOS manages its own compositor)
+#
+#    The --gamescope-with-controller / -gc flag is for desktop Linux users who
+#    want BOTH the Gamescope compositor AND controller input support. It is
+#    equivalent to passing --gamescope --controller (or -g -c) together and
+#    bakes both modes into the generated launcher script. Ideal for couch/TV
+#    setups on desktop Linux. Steam Deck users should use --steam-deck instead.
 #
 #  PIN A SPECIFIC GAME VERSION
 #    GAME_VERSION=0.36.9999.0 ./cluckers-setup.sh
@@ -349,7 +367,7 @@ error_exit() {
 # Returns:
 #   Always 0.
 print_help() {
-  sed -n '2,100p' "$0" | sed 's/^# \?//'
+  sed -n '2,104p' "$0" | sed 's/^# \?//'
 }
 
 # Returns 0 if the named command exists on PATH, 1 otherwise.
