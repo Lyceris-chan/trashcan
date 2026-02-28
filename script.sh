@@ -4296,12 +4296,11 @@ _cleanup() {
   sleep 0.5
 
   # Step 4: Force-kill any Wine helpers that survived the graceful shutdown.
-  # Safe to kill by exact name — these are Wine-internal process names that
-  # do not conflict with any regular Linux system processes.
-  pkill -KILL -x "winedevice.exe" 2>/dev/null || true
-  pkill -KILL -x "services.exe"   2>/dev/null || true
-  pkill -KILL -x "plugplay.exe"   2>/dev/null || true
-  pkill -KILL -x "wineserver"     2>/dev/null || true
+  # We scope the kill to our session (_GS_PID / _WINE_PID) to avoid killing
+  # Wine processes from other prefixes or games running concurrently.
+  # wineserver -k (above) handles winedevice.exe/services.exe scoped to our
+  # WINEPREFIX — broad pkill by name would affect all Wine instances.
+  _kill_session "${_WINE_PID:-}"
 
   # Remove temp files created during this launcher session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
