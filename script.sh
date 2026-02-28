@@ -1215,9 +1215,9 @@ _WARN = "  [\033[1;33mWARN\033[0m]"
 def compute_shortcut_id(exe: str, name: str) -> int:
     """Return the Steam non-Steam shortcut ID for the given exe + name pair.
 
-    Steam stores Exe in shortcuts.vdf as a quoted string and computes the
-    shortcut ID from the quoted form. We must use the same quoted form here
-    so the uninstall removes the correct entry.
+    Steam computes the shortcut ID from the raw (unquoted) exe path concatenated
+    with the app name. The Exe field in shortcuts.vdf is stored quoted, but the
+    ID itself is derived from the unquoted path.
 
     Args:
         exe:  Absolute path to the launcher script or executable (unquoted).
@@ -1226,8 +1226,7 @@ def compute_shortcut_id(exe: str, name: str) -> int:
     Returns:
         Unsigned 32-bit shortcut ID.
     """
-    quoted = f'"{exe}"'
-    crc = binascii.crc32((quoted + name).encode("utf-8")) & 0xFFFFFFFF
+    crc = binascii.crc32((exe + name).encode("utf-8")) & 0xFFFFFFFF
     return (crc | 0x80000000) & 0xFFFFFFFF
 
 
@@ -4216,18 +4215,12 @@ trap _cleanup EXIT INT TERM HUP
 # ---- Launch ---------------------------------------------------------------
 
 # Prepare final command.
-_launch_cmd=()
-if [[ -n "${PROTON_SCRIPT:-}" && -x "${PROTON_SCRIPT}" ]]; then
-  # Steam's Proton script handles SLR (Steam Linux Runtime) containers
-  # and prefix initialization automatically.
-  # We set STEAM_COMPAT_DATA_PATH to the root Cluckers directory;
-  # Proton looks for the Wine prefix in a subdirectory named 'pfx'.
-  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-${HOME}/.steam/steam}"
-  export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
-  _launch_cmd=("${PROTON_SCRIPT}" "run")
-else
-  _launch_cmd=("${WINE}")
-fi
+# Always launch the game using the Wine binary directly — never via 'proton run'.
+# The 'proton run' path invokes the Steam Linux Runtime (pressure-vessel) container
+# which requires Steam to be running. This caused gamescope to open but the game
+# never started. We replicate what pressure-vessel provides by setting LD_LIBRARY_PATH
+# to the Proton build's own lib directories, exactly as we do for maintenance tasks.
+_launch_cmd=("${WINE}")
 
 if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
@@ -4417,16 +4410,12 @@ _WARN = "  [\033[1;33mWARN\033[0m]"
 def compute_shortcut_id(exe: str, name: str) -> int:
     """Return the Steam non-Steam shortcut ID for the given exe + name pair.
 
-    Steam stores the Exe field in shortcuts.vdf as a QUOTED string, e.g.:
-        '"/home/user/.local/bin/cluckers-central.sh"'
-    When Steam recomputes the shortcut ID internally it uses the QUOTED form.
-    So the CRC must be computed from the quoted exe path, not the raw path.
-    This is how steam-rom-manager and Heroic compute the ID.
-
-    Source: https://github.com/nicowillis/steam-rom-manager — generateAppId.ts
+    Steam computes the shortcut ID from the raw (unquoted) exe path concatenated
+    with the app name. The Exe field in shortcuts.vdf is stored quoted, but the
+    ID itself is derived from the unquoted path. Verified against the original
+    working version of this script and the Steam source behaviour.
     """
-    quoted = f'"{exe}"'
-    crc = binascii.crc32((quoted + name).encode("utf-8")) & 0xFFFFFFFF
+    crc = binascii.crc32((exe + name).encode("utf-8")) & 0xFFFFFFFF
     return (crc | 0x80000000) & 0xFFFFFFFF
 
 
@@ -4527,21 +4516,16 @@ try:
     grid_dir = os.path.join(USER_CONFIG_DIR, "..", "grid")
     os.makedirs(grid_dir, exist_ok=True)
 
-    # Canonical artwork suffix mapping — verified from img-sauce labels.
-    # img-sauce label   → Steam grid/ suffix → source file
-    # library_capsule   → p                  → library_600x900_2x.jpg
-    # main_capsule      → (empty)            → capsule_616x353.jpg
-    # library_hero      → _hero              → library_hero_2x.jpg
-    # logo              → _logo              → logo_2x.png
-    # header            → _header            → header.jpg
-    # community_icon    → _icon              → 068664cf...jpg
+    # Artwork suffix mapping — exactly the 3 slots used by the old working version,
+    # verified from img-sauce labels and confirmed to display in Steam's library.
+    # img-sauce label  → Steam grid/ suffix → source file
+    # library_capsule  → p                  → library_600x900_2x.jpg
+    # library_hero     → _hero              → library_hero_2x.jpg
+    # logo             → _logo              → logo_2x.png
     art_map = {
-        STEAM_GRID:   "p",       # library_capsule  (600×900 portrait poster)
-        STEAM_WIDE:   "",        # main_capsule     (616×353 wide capsule)
-        STEAM_HERO:   "_hero",   # library_hero     (1920×620 background)
-        STEAM_LOGO:   "_logo",   # logo             (transparent overlay)
-        STEAM_HEADER: "_header", # header           (store header tile)
-        STEAM_ICON:   "_icon",   # community_icon   (game icon)
+        STEAM_GRID:   "p",      # library_capsule  (600×900 portrait poster)
+        STEAM_HERO:   "_hero",  # library_hero     (1920×620 background)
+        STEAM_LOGO:   "_logo",  # logo             (transparent overlay)
     }
 
     # Steam uses the 32-bit unsigned CRC as the prefix for grid/ filenames.
