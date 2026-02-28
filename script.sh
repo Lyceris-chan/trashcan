@@ -577,15 +577,6 @@ install_sys_deps() {
     fi
   fi
 
-  # Ensure python3-pillow is installed for icon extraction (fallback for pip).
-  local pillow_pkg="python3-pillow"
-  [[ "${pkg_mgr}" == "pacman" ]] && pillow_pkg="python-pillow"
-  [[ "${pkg_mgr}" == "dnf" ]] && pillow_pkg="python3-pillow"
-  [[ "${pkg_mgr}" == "zypper" ]] && pillow_pkg="python3-Pillow"
-  if ! is_pkg_installed "${pkg_mgr}" "${pillow_pkg}"; then
-    to_install+=("${pillow_pkg}")
-  fi
-
   # Some distros provide wine/winetricks commands via package names that differ
   # from binary names. Ensure apt users still receive the full runtime stack.
   if [[ "${pkg_mgr}" == "apt" ]]; then
