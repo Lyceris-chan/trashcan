@@ -4285,33 +4285,12 @@ _cleanup() {
   pkill -KILL -x "gamescope-wl"    2>/dev/null || true
   pkill -KILL -f "gamescopereaper" 2>/dev/null || true
 
-  # Kill winedevice.exe and wineserver processes associated with our prefix.
-  # pkill -f uses regex and dots in WINEPREFIX match any character. Instead,
-  # scan /proc directly using fixed-string grep to avoid false positives.
-  # wineserver is a daemon not a child of gamescope, so session/group kills
-  # above do not reach it — we must kill it explicitly here.
-  # Kill Wine helper processes (winedevice.exe, wineserver, services.exe, etc.)
-  # that belong to our WINEPREFIX. These are daemon processes — they are NOT
-  # children of gamescope and are not in its session or process group, so the
-  # kill -- -PID and pkill -s calls above do not reach them.
-  #
-  # WINEPREFIX is set as an environment variable, not a command-line argument,
-  # so it appears in /proc/PID/environ rather than /proc/PID/cmdline.
-  # We scan /proc/PID/environ with fixed-string (grep -F) matching to avoid
-  # regex false-positives from dots and slashes in the WINEPREFIX path.
-  local _pid_path _pid _environ
-  for _pid_path in /proc/[0-9]*/environ; do
-    _environ=$(tr '\0' '\n' < "${_pid_path}" 2>/dev/null) || continue
-    if printf '%s' "${_environ}" | grep -qF "WINEPREFIX=${WINEPREFIX}"; then
-      _pid="${_pid_path%/environ}"
-      _pid="${_pid##/proc/}"
-      kill -KILL "${_pid}" 2>/dev/null || true
-    fi
-  done
-
-  # Shut down the wineserver for our prefix to flush pending registry writes.
+  # Shut down the wineserver for our prefix. This sends a graceful shutdown
+  # to wineserver, which then terminates winedevice.exe, services.exe, and
+  # all other Wine helper processes associated with this prefix.
+  # Scoped by WINEPREFIX so other Wine prefixes are not affected.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
-  sleep 0.3
+  sleep 0.5
 
   # Remove temp files created during this launcher session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
