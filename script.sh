@@ -4098,13 +4098,11 @@ export WINEDEBUG="-all"
 #               is NOT used, as Gamescope requires the X11 driver to function.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
-  cat << 'DLLOVEOF'
-_dll_overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b;xinput1_3=n"
-if [[ "${USE_GAMESCOPE}" == "false" ]]; then
-  _dll_overrides="${_dll_overrides};winex11.drv="
-fi
-export WINEDLLOVERRIDES="${_dll_overrides}"
-DLLOVEOF
+  _overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b;xinput1_3=n"
+  if [[ "${use_gamescope}" == "false" ]]; then
+    _overrides="${_overrides};winex11.drv="
+  fi
+  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
   # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
   # all joysticks. Without this, Wine's winebus.sys and SDL's HIDAPI layer both
   # enumerate the same physical device, causing duplicate axis events and phantom
@@ -4145,13 +4143,11 @@ done
 [[ -n "${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="${_sdl_db}"
 SDLEOF
 else
-  cat << 'DLLOVEOF'
-_dll_overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b"
-if [[ "${USE_GAMESCOPE}" == "false" ]]; then
-  _dll_overrides="${_dll_overrides};winex11.drv="
-fi
-export WINEDLLOVERRIDES="${_dll_overrides}"
-DLLOVEOF
+  _overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b"
+  if [[ "${use_gamescope}" == "false" ]]; then
+    _overrides="${_overrides};winex11.drv="
+  fi
+  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
 fi)
 
 # Wine binary and optional Proton script resolved by find_wine() at setup time.
