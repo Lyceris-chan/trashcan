@@ -180,11 +180,12 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-# Desktop icon: use the authoritative 32×32 ICO from Steam's community assets.
-# ICO is natively supported by all major Linux desktop environments (GNOME, KDE,
-# XFCE) via absolute path in Icon=. Stored alongside the portrait poster so
-# both are available (portrait poster is used for Steam grid p-suffix artwork).
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.ico"  # game icon (32×32 ICO, Steam community assets)
+# Desktop icon: PNG extracted from the Steam community ICO (via ImageMagick) or
+# the portrait poster JPG as a fallback. PNG is used instead of ICO because most
+# Linux desktop environments (GNOME, KDE, XFCE) do not render .ico files reliably
+# via absolute path in Icon=. The ICO itself is kept at STEAM_ICO_PATH for use
+# in the Steam shortcuts.vdf "icon" field where ICO is the correct format.
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"  # game icon (PNG for .desktop Icon= field)
 readonly ICON_POSTER_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster (600×900), Steam grid only
 
 readonly APP_NAME="Cluckers Central"
@@ -1148,6 +1149,7 @@ run_uninstall() {
     "${LAUNCHER_SCRIPT}"
     "${DESKTOP_FILE}"
     "${ICON_PATH}"
+    "${ICON_DIR}/cluckers-central.ico"
     "${ICON_POSTER_PATH}"
     "${TOOLS_DIR}/shm_launcher.exe"
     "${TOOLS_DIR}/xinput1_3.dll"
@@ -3770,25 +3772,33 @@ XDLL_B64_EOF
     curl ${CURL_FLAGS}f -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" || true
 
     # Download the game's ICO from Steam's community assets (32×32, authoritative
-    # game icon). Used as both:
-    #   • shortcuts.vdf "icon" field (Steam shortcut icon)
-    #   • desktop .desktop Icon= field (taskbar, launcher, alt-tab icon)
-    # ICO is natively handled by Steam and all major Linux desktop environments.
+    # icon Steam itself uses). The ICO is kept for the Steam shortcuts.vdf "icon"
+    # field. For the .desktop file we need a PNG — most Linux desktop environments
+    # (GNOME, KDE, XFCE) do not render .ico files reliably via absolute path.
     mkdir -p "${ICON_DIR}"
     if curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}"; then
-      # Copy ICO to both locations (ICON_PATH for desktop, STEAM_ICO_PATH for Steam).
-      # ICON_PATH = ~/.local/share/icons/cluckers-central.ico (desktop file)
-      # STEAM_ICO_PATH = ~/.cluckers/assets/icon.ico (Steam shortcuts.vdf)
-      cp "${STEAM_ICO_PATH}" "${ICON_PATH}"
-      ok_msg "Game icon downloaded successfully."
+      ok_msg "Game ICO downloaded (used for Steam shortcut icon)."
+      # Extract the highest-quality image from the ICO as a PNG for the desktop icon.
+      # ImageMagick's convert picks the largest embedded image automatically.
+      if command_exists convert; then
+        convert "${STEAM_ICO_PATH}[0]" "${ICON_PATH}" 2>/dev/null \
+          && ok_msg "Game icon extracted as PNG for desktop shortcut." \
+          || warn_msg "convert failed — will fall back to portrait poster for desktop icon."
+      fi
     else
       warn_msg "Could not download game ICO — desktop icon will use fallback."
     fi
 
     # Copy the portrait poster (600×900) to ICON_POSTER_PATH for Steam grid use.
-    # It is NOT used as the desktop icon (the ICO is used instead).
+    # Also use it as the desktop PNG icon if the ICO extraction above didn't produce one
+    # (either because the ICO download failed or ImageMagick is not installed).
     if [[ -f "${STEAM_GRID_PATH}" ]]; then
       cp "${STEAM_GRID_PATH}" "${ICON_POSTER_PATH}"
+      # Use the portrait poster as the desktop icon fallback if PNG is still missing.
+      if [[ ! -f "${ICON_PATH}" ]]; then
+        cp "${STEAM_GRID_PATH}" "${ICON_PATH}"
+        ok_msg "Using portrait poster as desktop icon fallback."
+      fi
       ok_msg "High-quality Steam assets downloaded."
     else
       warn_msg "Grid poster unavailable — portrait poster slot will be empty."
