@@ -23,14 +23,13 @@
 #                                                 # Also triggered when both -g and -c are passed.
 #    ./cluckers-setup.sh --steam-deck             # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller             # opt-in: enable controller support   (-c)
-#    ./cluckers-setup.sh --show-movies            # opt-out: show intro movies          (-m)
 #    ./cluckers-setup.sh --update                 # check for game update       (-u)
 #    ./cluckers-setup.sh --uninstall              # remove everything
 #    ./cluckers-setup.sh --help                   # show this help message      (-h)
 #
 #  SHORT FLAGS
 #    -a  auto    -v  verbose    -g  gamescope    -gc  gamescope-with-controller
-#    -d  steam-deck    -c  controller    -m  show-movies    -u  update    -h  help
+#    -d  steam-deck    -c  controller    -u  update    -h  help
 #    Passing both -g and -c together is the same as -gc (auto-detected).
 #    --uninstall  (full word only, no short alias — removes everything)
 #
@@ -78,10 +77,6 @@
 #    equivalent to passing --gamescope --controller (or -g -c) together and
 #    bakes both modes into the generated launcher script. Ideal for couch/TV
 #    setups on desktop Linux. Steam Deck users should use --steam-deck instead.
-#
-#  INTRO MOVIES
-#    Intro movies (Georgia Media, Hi-Rez) are disabled by default to reach
-#    the login screen faster. To re-enable them, pass --show-movies / -m.
 #
 #  PIN A SPECIFIC GAME VERSION
 #    GAME_VERSION=0.36.9999.0 ./cluckers-setup.sh
@@ -1567,14 +1562,12 @@ parallel_download() {
 # Arguments:
 #   $1 - steam_deck_flag: "true" | "false"
 #   $2 - controller_flag: "true" | "false"
-#   $3 - skip_movies_flag: "true" | "false"
 #
 # Returns:
 #   0 on success; exits with error via error_exit() on failure.
 run_update() {
   local -r steam_deck_flag="$1"
   local -r controller_flag="$2"
-  local -r skip_movies_flag="$3"
 
   printf "\n"
   printf "%b╔══════════════════════════════════════════════════════╗%b\n" "${GREEN}" "${NC}"
@@ -1735,9 +1728,8 @@ ZIPBLAKE3EOF
   # Apply game patches (Deck, controller, movies) if any flags were set.
   # Without this, --update --steam-deck would download the update but skip
   # re-applying input patches, leaving the game unconfigured for the Deck.
-  if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" \
-     || "${skip_movies_flag}" == "true" ]]; then
-    apply_game_patches "${GAME_DIR}" "${steam_deck_flag}" "${controller_flag}" "${skip_movies_flag}"
+  if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
+    apply_game_patches "${GAME_DIR}" "${steam_deck_flag}" "${controller_flag}"
   fi
 }
 
@@ -1793,7 +1785,6 @@ is_steam_deck() {
 #   $1 - game_dir: absolute path to the game data directory (GAME_DIR).
 #   $2 - steam_deck_flag: "true" | "false"
 #   $3 - controller_flag: "true" | "false"
-#   $4 - skip_movies_flag: "true" | "false"
 #
 # Returns:
 #   0 on success; 1 if required config directories not found.
@@ -1801,7 +1792,6 @@ apply_game_patches() {
   local game_dir="$1"
   local -r steam_deck_flag="$2"
   local -r controller_flag="$3"
-  local -r skip_movies_flag="$4"
   local config_dir="${game_dir}/Realm-Royale/RealmGame/Config"
   local engine_config_dir="${game_dir}/Realm-Royale/Engine/Config"
 
@@ -1816,10 +1806,6 @@ apply_game_patches() {
 
   # List all applicable patches based on preferences
   info_msg "Evaluating applicable patches:"
-  [[ "${skip_movies_flag}" == "true" ]] \
-    && info_msg "  • [Skip Movies] Force intro movies to be skipped"
-  [[ "${skip_movies_flag}" == "false" ]] \
-    && info_msg "  • [Restore Movies] Re-enable intro movies"
   [[ "${steam_deck_flag}" == "true" ]] \
     && info_msg "  • [Steam Deck] Force 1280x800 resolution and fullscreen"
   if [[ "${steam_deck_flag}" == "true" || "${controller_flag}" == "true" ]]; then
@@ -1834,69 +1820,7 @@ apply_game_patches() {
     mkdir -p "${game_dir}"
     touch "${game_dir}/.controller_enabled"
   fi
-  if [[ "${skip_movies_flag}" == "false" ]]; then
-    mkdir -p "${game_dir}"
-    touch "${game_dir}/.show_movies"
-  fi
 
-  # -- Movies: handle intro movies (skip or restore) -------------------------
-  if [[ "${skip_movies_flag}" == "true" ]]; then
-    info_msg "Patch: Skipping intro movies (INI)..."
-  else
-    info_msg "Patch: Restoring intro movies..."
-  fi
-
-  # 1. Patch INI files.
-  for ini in \
-    "${config_dir}/RealmEngine.ini" \
-    "${engine_config_dir}/BaseEngine.ini"; do
-    if [[ -f "${ini}" ]]; then
-      chmod u+w "${ini}"
-      python3 - "${ini}" "${skip_movies_flag}" << 'MOVIE_PATCH_EOF'
-import sys, re
-
-path = sys.argv[1]
-skip = sys.argv[2].lower() == "true"
-target = "bForceNoMovies=" + ("TRUE" if skip else "FALSE")
-
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    lines = f.readlines()
-
-out_lines = []
-in_section = False
-found_key = False
-section_exists = False
-
-for line in lines:
-    trimmed = line.strip()
-    if trimmed.startswith("[") and trimmed.endswith("]"):
-        if in_section and not found_key:
-            out_lines.append(target + "\n")
-            found_key = True
-        in_section = (trimmed.lower() == "[fullscreenmovie]")
-        if in_section: section_exists = True
-
-    if in_section and trimmed.lower().startswith("bforcenomovies="):
-        line = target + "\n"
-        found_key = True
-
-    out_lines.append(line)
-
-# Handle case where section was at the very end of file
-if in_section and not found_key:
-    out_lines.append(target + "\n")
-    found_key = True
-
-# If section didn't exist at all, append it
-if not section_exists:
-    out_lines.append("\n[FullScreenMovie]\n")
-    out_lines.append(target + "\n")
-
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(out_lines)
-MOVIE_PATCH_EOF
-    fi
-  done
 
   # -- Display: force fullscreen 1280x800 (Steam Deck only) ------------------
   if [[ "${steam_deck_flag}" == "true" ]]; then
@@ -2541,7 +2465,6 @@ main() {
   local use_gamescope="false"
   local steam_deck="false"
   local controller_mode="false"
-  local skip_movies="true"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
@@ -2551,10 +2474,6 @@ main() {
   local controller_pref_file="${GAME_DIR}/.controller_enabled"
   if [[ -f "${controller_pref_file}" ]]; then
     controller_mode="true"
-  fi
-  local show_movies_pref="${GAME_DIR}/.show_movies"
-  if [[ -f "${show_movies_pref}" ]]; then
-    skip_movies="false"
   fi
 
   # Detected once early — available for Step 4 (DXVK decision) and
@@ -2605,11 +2524,6 @@ main() {
         controller_mode="false"
         [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}"
         ;;
-      --skip-movies)
-        skip_movies="true"
-        [[ -f "${show_movies_pref}" ]] && rm -f "${show_movies_pref}"
-        ;;
-      --show-movies|-m)  skip_movies="false" ;;
       --help|-h)         print_help; exit 0 ;;
       *) warn_msg "Unknown flag ignored: '${arg}' (try --help for usage)" ;;
     esac
@@ -2628,10 +2542,6 @@ main() {
   if [[ "${controller_mode}" == "true" ]]; then
     mkdir -p "${GAME_DIR}"
     touch "${controller_pref_file}"
-  fi
-  if [[ "${skip_movies}" == "false" ]]; then
-    mkdir -p "${GAME_DIR}"
-    touch "${show_movies_pref}"
   fi
 
   # Show the banner immediately so the user knows the script has started.
@@ -2690,7 +2600,7 @@ main() {
 
   local skip_heavy_steps="false"
   if [[ "${do_update}" == "true" ]]; then
-    run_update "${steam_deck}" "${controller_mode}" "${skip_movies}"
+    run_update "${steam_deck}" "${controller_mode}"
     skip_heavy_steps="true"
   fi
 
@@ -3775,75 +3685,61 @@ XDLL_B64_EOF
     # icon Steam itself uses). The ICO is kept for the Steam shortcuts.vdf "icon"
     # field. For the .desktop file we need a PNG — most Linux desktop environments
     # (GNOME, KDE, XFCE) do not render .ico files reliably via absolute path.
-    # Install the game icon into the XDG hicolor theme so every desktop
-    # environment (GNOME, KDE, XFCE) finds it reliably by name rather than
-    # by absolute path. An absolute path to a plain file in ~/.local/share/icons/
-    # is not reliably picked up — it must be in a theme subdirectory.
-    # We install at 32x32 (matching the ICO) and also at 256x256 scaled from
-    # the portrait poster so high-DPI desktops get a crisp large icon.
+    # Install the game icon into the XDG hicolor theme so desktop environments
+    # (GNOME, KDE, XFCE) find it reliably by name. An absolute path to a flat
+    # file in ~/.local/share/icons/ is NOT reliably picked up — icons must live
+    # in a theme subdirectory. We use Icon=cluckers-central (name only) in the
+    # .desktop file so the DE resolves it through the theme.
+    #
+    # Both size slots (32x32 and 256x256) are filled from the Steam community
+    # ICO — 32x32 is the native size, 256x256 is the ICO upscaled so HiDPI
+    # desktops get a full-resolution slot rather than a blurry upscale.
+    # The portrait poster is NOT used for the desktop icon.
     local _hicolor_32="${ICON_DIR}/hicolor/32x32/apps"
     local _hicolor_256="${ICON_DIR}/hicolor/256x256/apps"
-    local _icon_name="cluckers-central"  # used in Icon= field (no path, no ext)
+    local _icon_name="cluckers-central"  # matches Icon= in .desktop (no path, no ext)
     mkdir -p "${_hicolor_32}" "${_hicolor_256}"
 
     if curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}"; then
-      ok_msg "Game ICO downloaded (used for Steam shortcut icon)."
-      # Convert ICO → PNG and install into hicolor theme at 32x32.
-      python3 - "${STEAM_ICO_PATH}" "${_hicolor_32}/${_icon_name}.png" << 'ICO2PNG_EOF' || true
+      ok_msg "Game ICO downloaded."
+      # Convert ICO → PNG and install into both hicolor size slots.
+      # 32x32: native ICO size. 256x256: upscaled for HiDPI desktops.
+      python3 - "${STEAM_ICO_PATH}" "${_hicolor_32}/${_icon_name}.png" "${_hicolor_256}/${_icon_name}.png" << 'ICO2PNG_EOF' || true
 import sys
 try:
     from PIL import Image
-    ico, out = sys.argv[1], sys.argv[2]
+    ico = sys.argv[1]
+    out_32 = sys.argv[2]
+    out_256 = sys.argv[3]
     img = Image.open(ico)
     if hasattr(img, 'ico') and img.ico.sizes():
         best = max(img.ico.sizes(), key=lambda s: s[0] * s[1])
         img = img.ico.getimage(best)
     img = img.convert("RGBA")
-    img.save(out, "PNG")
-    print(f"[icon] Installed {img.width}x{img.height} icon to hicolor theme.")
+    img.save(out_32, "PNG")
+    img256 = img.resize((256, 256), Image.LANCZOS)
+    img256.save(out_256, "PNG")
+    print(f"[icon] Installed {img.width}x{img.height} and 256x256 icons to hicolor theme.")
 except ImportError:
+    print("[icon] Pillow not available — desktop icon will be missing.", file=sys.stderr)
     sys.exit(1)
 except Exception as e:
     print(f"[icon] ICO->PNG failed: {e}", file=sys.stderr)
     sys.exit(1)
 ICO2PNG_EOF
     else
-      warn_msg "Could not download game ICO — desktop icon will use portrait poster fallback."
+      warn_msg "Could not download game ICO — desktop icon will be missing."
     fi
 
-    # Copy the portrait poster (600×900) to ICON_POSTER_PATH for Steam grid use
-    # and also install a scaled copy into hicolor/256x256 for high-DPI desktops.
+    # Copy the portrait poster to ICON_POSTER_PATH for Steam grid artwork only.
     if [[ -f "${STEAM_GRID_PATH}" ]]; then
       cp "${STEAM_GRID_PATH}" "${ICON_POSTER_PATH}"
-      # Scale portrait poster to 256x256 PNG for high-DPI icon slot.
-      python3 - "${STEAM_GRID_PATH}" "${_hicolor_256}/${_icon_name}.png" << 'SCALE256_EOF' || \
-        cp "${STEAM_GRID_PATH}" "${_hicolor_256}/${_icon_name}.png" || true
-import sys
-try:
-    from PIL import Image
-    img = Image.open(sys.argv[1]).convert("RGBA")
-    img = img.resize((256, 256), Image.LANCZOS)
-    img.save(sys.argv[2], "PNG")
-    print("[icon] Installed 256x256 icon to hicolor theme.")
-except Exception as e:
-    print(f"[icon] scale failed: {e}", file=sys.stderr)
-    sys.exit(1)
-SCALE256_EOF
-      # If 32x32 hicolor slot still empty (ICO download failed), copy the 256 there too.
-      if [[ ! -f "${_hicolor_32}/${_icon_name}.png" ]]; then
-        cp "${_hicolor_256}/${_icon_name}.png" "${_hicolor_32}/${_icon_name}.png" 2>/dev/null || true
-      fi
       ok_msg "High-quality Steam assets downloaded."
     else
       warn_msg "Grid poster unavailable — portrait poster slot will be empty."
     fi
 
-    # Also copy the 32x32 icon to the legacy flat location ICON_PATH so the
-    # absolute-path fallback in the .desktop file still works on DEs that
-    # don't honour the hicolor theme lookup.
-    cp "${_hicolor_32}/${_icon_name}.png" "${ICON_PATH}" 2>/dev/null || true
-
-    # Refresh the icon theme cache so the new icons are found immediately.
+    # Refresh the icon theme cache so the new icons appear immediately.
     if command_exists gtk-update-icon-cache; then
       gtk-update-icon-cache -f -t "${ICON_DIR}/hicolor" 2>/dev/null || true
     fi
@@ -4011,62 +3907,10 @@ cd "\${GAME_DIR}"
 
 USE_GAMESCOPE="${use_gamescope}"
 GS_ARGS="${GAMESCOPE_ARGS}"
-SKIP_MOVIES="${skip_movies}"
 GATEWAY_URL="${GATEWAY_URL:-https://gateway-dev.project-crown.com}"
 HOST_X="${HOST_X:-157.90.131.105}"
 CREDS_FILE="${CLUCKERS_ROOT}/credentials.enc"
 
-# Skip intro movies if the user hasn't opted in to showing them.
-# Patches INI files to set bForceNoMovies.
-# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/deckconfig.go
-_handle_movies() {
-  local skip="\$1"
-  local skip_val="FALSE"
-  [[ "\${skip}" == "true" ]] && skip_val="TRUE"
-
-  local target="bForceNoMovies=\${skip_val}"
-  local ini
-
-  # 1. Patch INI files.
-  for ini in \
-    "\${GAME_DIR}/Realm-Royale/RealmGame/Config/RealmEngine.ini" \
-    "\${GAME_DIR}/Realm-Royale/Engine/Config/BaseEngine.ini"; do
-    [[ -f "\${ini}" ]] || continue
-
-    python3 - "\${ini}" "\${target}" << 'MOVIE_PATCH_EOF'
-import sys
-path = sys.argv[1]
-target = sys.argv[2]
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    lines = f.readlines()
-out = []
-in_section = False
-found_key = False
-section_exists = False
-for line in lines:
-    t = line.strip()
-    if t.startswith("[") and t.endswith("]"):
-        if in_section and not found_key:
-            out.append(target + "\n")
-            found_key = True
-        in_section = (t.lower() == "[fullscreenmovie]")
-        if in_section: section_exists = True
-    if in_section and t.lower().startswith("bforcenomovies="):
-        line = target + "\n"
-        found_key = True
-    out.append(line)
-if in_section and not found_key:
-    out.append(target + "\n")
-    found_key = True
-if not section_exists:
-    out.append("\n[FullScreenMovie]\n")
-    out.append(target + "\n")
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(out)
-MOVIE_PATCH_EOF
-  done
-}
-_handle_movies "\${SKIP_MOVIES}"
 
 # Gamescope PID (if used).
 _GS_PID=""    # PID of gamescope process group leader (gamescope path)
@@ -4297,7 +4141,7 @@ fi
 # has spawned internally (winedevice.exe, services.exe, etc.).
 _kill_session() {
   local pid="${1:-}"
-  [[ -z "${pid}" ]] || [[ "${pid}" == "0" ]] && return
+  [[ -z "${pid}" || "${pid}" == "0" ]] && return
   # SIGTERM the entire session, wait up to 3 s, then SIGKILL survivors.
   pkill -TERM -s "${pid}" 2>/dev/null || true
   local _w=0
@@ -4343,28 +4187,22 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
   # the game process starts.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
-    # Use setsid so gamescope becomes the session AND process group leader.
-    # This ensures kill -- -${_GS_PID} in _cleanup reaches the entire tree:
-    # gamescope → gamescope-reaper → wine → shm_launcher.exe → game.
-    # DBUS_SESSION_BUS_ADDRESS=/dev/null prevents gamescope from connecting to
-    # an existing D-Bus session and interfering with the desktop environment.
+    # setsid makes gamescope the session leader (SID == _GS_PID). pkill -s
+    # _GS_PID in _kill_session() then reaches the entire tree: gamescope,
+    # gamescope-reaper, wine, and all Wine children (winedevice.exe, etc.).
+    # DBUS_SESSION_BUS_ADDRESS=/dev/null prevents gamescope from connecting
+    # to an existing D-Bus session and interfering with the desktop.
     # shellcheck disable=SC2086
-    # --fork ensures setsid always creates a new session even if the shell is
-    # already a process group leader. The setsid process itself becomes the
-    # session leader (SID == its PID == _GS_PID), so pkill -s _GS_PID in
-    # _kill_session() reaches gamescope, gamescope-reaper, wine, and all
-    # Wine children (winedevice.exe, services.exe) regardless of child groups.
-    # shellcheck disable=SC2086
-    setsid --fork env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
+    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
       "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
         "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
         "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    # Run wine in its own session so _cleanup can kill wine and all its
-    # children (winedevice.exe, services.exe, the game) via pkill -s PID.
-    setsid --fork "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
+    # setsid makes wine the session leader so pkill -s _WINE_PID in
+    # _kill_session() reaches wine and all its children (winedevice.exe, etc.).
+    setsid "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
       "${_game_args[@]}" &
     _WINE_PID=$!
@@ -4374,11 +4212,11 @@ else
   # No bootstrap data available — launch the game directly without shared memory.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
-    setsid --fork env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
+    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    setsid --fork "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
+    setsid "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _WINE_PID=$!
     wait "${_WINE_PID}"
   fi
@@ -4587,14 +4425,10 @@ try:
     # Source: Valve's internal format, reproduced by steam-rom-manager.
     quoted_exe = f'"{LAUNCHER}"'
     start_dir  = f'"{os.path.dirname(LAUNCHER)}"'
-    # Use the 32×32 ICO from Steam's community assets as the Steam shortcut icon.
-    # This is the authoritative game icon Steam itself uses — ICO is natively
-    # read by both Steam (shortcuts.vdf "icon" field) and Linux desktop
-    # environments (XDG icon theme). Falls back to the portrait poster if the
-    # ICO was not downloaded successfully.
-    # The desktop .desktop Icon= field uses ICON_PATH (the 32×32 ICO).
-    # Fallback to ICON_PATH (ICO) if STEAM_ICO env var is not set, then to the
-    # portrait poster as a last resort.
+    # Use the Steam community ICO as the Steam shortcut icon (shortcuts.vdf
+    # "icon" field). Fall back to ICON_PATH if the ICO was not downloaded.
+    # The desktop .desktop file uses Icon=cluckers-central (theme name lookup),
+    # not an absolute path, so ICON_PATH is only used here as a fallback.
     icon_path = STEAM_ICO if STEAM_ICO and os.path.exists(STEAM_ICO) else ICON_PATH
     # LaunchOptions: leave empty — the launcher script handles gamescope
     # and all launch arguments internally. Putting gamescope here would cause
@@ -4736,10 +4570,6 @@ fi
   #      bXAxis" and "Count bYAxis" from mouse bindings. This prevents the
   #      controller from switching to KB/M mode under Wine.
   #
-  #   3. Intro Movies — renames .bik files to .bik.bak to skip the long
-  #      startup logos (Georgia Media / Hi-Rez). Enabled by default.
-  #      Pass --show-movies / -m to restore them.
-  #
   #   4. controller_neptune_config.vdf — deploy the custom Steam Deck button
   #      layout (Steam Deck only).
   #
@@ -4752,7 +4582,7 @@ fi
     warn_msg "Applying patches anyway as --steam-deck / -d was passed."
   fi
 
-  apply_game_patches "${GAME_DIR}" "${steam_deck}" "${controller_mode}" "${skip_movies}"
+  apply_game_patches "${GAME_DIR}" "${steam_deck}" "${controller_mode}"
 
   fi # end skip_heavy_steps
 
