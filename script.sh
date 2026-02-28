@@ -3154,6 +3154,24 @@ EOF
 
   mkdir -p "${GAME_DIR}"
 
+  # Verify that the game directory is writable before attempting a multi-GB
+  # download. A read-only or permission-denied directory causes a confusing
+  # failure deep into the download rather than a clear error up front.
+  # Common causes: the directory was created as root, or lives on a read-only
+  # mount (e.g. an NTFS drive mounted without write permissions).
+  if [[ ! -w "${GAME_DIR}" ]]; then
+    error_exit "Game directory is not writable: ${GAME_DIR}
+  Fix with: chmod u+w \"${GAME_DIR}\"
+  Or check that the filesystem is mounted with write permissions."
+  fi
+
+  # Also verify that the parent filesystem is not mounted read-only.
+  if ! touch "${GAME_DIR}/.write_test" 2>/dev/null; then
+    error_exit "Cannot write to game directory: ${GAME_DIR}
+  The filesystem may be mounted read-only. Check: mount | grep \$(df -P \"${GAME_DIR}\" | tail -1 | awk '{print \$1}')"
+  fi
+  rm -f "${GAME_DIR}/.write_test"
+
   local local_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
   if [[ -f "${local_game_exe}" ]]; then
     ok_msg "Game files already present at ${GAME_DIR} — skipping download."
@@ -3718,31 +3736,65 @@ XDLL_B64_EOF
 
     if curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}"; then
       ok_msg "Game ICO downloaded."
-      # Convert ICO → PNG and install into both hicolor size slots.
-      # 32x32: native ICO size. 256x256: upscaled for HiDPI desktops.
-      python3 - "${STEAM_ICO_PATH}" "${_hicolor_32}/${_icon_name}.png" "${_hicolor_256}/${_icon_name}.png" << 'ICO2PNG_EOF' || true
-import sys
+      # Convert the ICO to PNG and install it into the XDG hicolor icon theme.
+      #
+      # We install into two size slots:
+      #   32x32   — the ICO's native size, used by most panel/taskbar renderers.
+      #   256x256 — upscaled copy for HiDPI desktops (GNOME, KDE Plasma).
+      #
+      # We also copy the PNG to ICON_PATH (~/.local/share/icons/cluckers-central.png)
+      # as a flat fallback, because some desktop environments (notably older XFCE
+      # and Cinnamon) look for the icon by the absolute path set in the Icon= field
+      # before consulting the theme cache.
+      #
+      # If Pillow is unavailable, ImageMagick's `convert` is tried as a fallback.
+      # If neither is available, the portrait poster JPG is used as a last resort.
+      local _ico_ok="false"
+      python3 - "${STEAM_ICO_PATH}" \
+               "${_hicolor_32}/${_icon_name}.png" \
+               "${_hicolor_256}/${_icon_name}.png" \
+               "${ICON_PATH}" << 'ICO2PNG_EOF' && _ico_ok="true" || true
+import sys, shutil
 try:
     from PIL import Image
-    ico = sys.argv[1]
-    out_32 = sys.argv[2]
-    out_256 = sys.argv[3]
+    ico      = sys.argv[1]
+    out_32   = sys.argv[2]
+    out_256  = sys.argv[3]
+    out_flat = sys.argv[4]
     img = Image.open(ico)
+    # Use ico.getimage() to pick the largest frame from multi-frame ICO files.
     if hasattr(img, 'ico') and img.ico.sizes():
         best = max(img.ico.sizes(), key=lambda s: s[0] * s[1])
         img = img.ico.getimage(best)
     img = img.convert("RGBA")
-    img.save(out_32, "PNG")
-    img256 = img.resize((256, 256), Image.LANCZOS)
-    img256.save(out_256, "PNG")
-    print(f"[icon] Installed {img.width}x{img.height} and 256x256 icons to hicolor theme.")
+    img.save(out_32,   "PNG")
+    img.resize((256, 256), Image.LANCZOS).save(out_256, "PNG")
+    # Flat fallback copy — some DEs resolve the icon by absolute path.
+    shutil.copy2(out_32, out_flat)
+    print(f"[icon] Installed {img.width}x{img.height} → hicolor 32x32, 256x256, and flat fallback.")
 except ImportError:
-    print("[icon] Pillow not available — desktop icon will be missing.", file=sys.stderr)
+    print("[icon] Pillow not available — trying ImageMagick fallback.", file=sys.stderr)
     sys.exit(1)
 except Exception as e:
-    print(f"[icon] ICO->PNG failed: {e}", file=sys.stderr)
+    print(f"[icon] ICO->PNG conversion failed: {e}", file=sys.stderr)
     sys.exit(1)
 ICO2PNG_EOF
+
+      # ImageMagick fallback: used when Pillow is not installed.
+      if [[ "${_ico_ok}" == "false" ]] && command_exists convert; then
+        convert "${STEAM_ICO_PATH}[0]" "${_hicolor_32}/${_icon_name}.png" 2>/dev/null \
+          && convert "${STEAM_ICO_PATH}[0]" -resize 256x256 "${_hicolor_256}/${_icon_name}.png" 2>/dev/null \
+          && cp "${_hicolor_32}/${_icon_name}.png" "${ICON_PATH}" \
+          && _ico_ok="true" \
+          || true
+        [[ "${_ico_ok}" == "true" ]] && ok_msg "Game icon installed via ImageMagick."
+      fi
+
+      # Last resort: use the portrait poster JPG as the desktop icon.
+      if [[ "${_ico_ok}" == "false" ]] && [[ -f "${STEAM_GRID_PATH}" ]]; then
+        cp "${STEAM_GRID_PATH}" "${ICON_PATH}"
+        warn_msg "Using portrait poster as desktop icon (Pillow and ImageMagick unavailable)."
+      fi
     else
       warn_msg "Could not download game ICO — desktop icon will be missing."
     fi
@@ -4158,31 +4210,51 @@ fi
 _kill_session() {
   local pid="${1:-}"
   [[ -z "${pid}" || "${pid}" == "0" ]] && return
-  # SIGTERM the entire session, wait up to 3 s, then SIGKILL survivors.
+
+  # Kill by session ID first — reaches every process whose SID == pid,
+  # regardless of how many process groups Wine has spawned internally.
   pkill -TERM -s "${pid}" 2>/dev/null || true
+
+  # Also kill by parent PID to catch any child that joined a new session
+  # (gamescope-wl and gamescopereaper sometimes do this).
+  pkill -TERM -P "${pid}" 2>/dev/null || true
+
+  # Wait up to 3 seconds for the session leader to exit, then SIGKILL survivors.
   local _w=0
   while kill -0 "${pid}" 2>/dev/null && (( _w < 30 )); do
     sleep 0.1; (( _w++ )) || true
   done
   pkill -KILL -s "${pid}" 2>/dev/null || true
+  pkill -KILL -P "${pid}" 2>/dev/null || true
 }
 
 _cleanup() {
   # Remove the trap to prevent recursion.
   trap '' EXIT INT TERM HUP
 
-  # Kill the gamescope session (gamescope → reaper → wine → game).
+  # Kill the gamescope session (gamescope → gamescopereaper → gamescope-wl
+  # → wine → game). We kill by both session and parent PID because
+  # gamescope spawns gamescopereaper and gamescope-wl as children that
+  # may be in a different session from the original setsid call.
   _kill_session "${_GS_PID:-}"
 
   # Kill the wine session for the non-gamescope path (wine → game → winedevice).
   _kill_session "${_WINE_PID:-}"
 
-  # Shut down the wineserver for OUR prefix only — flushes pending registry
-  # writes and reaps any remaining winedevice.exe / services.exe.
-  # Scoped by WINEPREFIX so other Wine prefixes/games are unaffected.
+  # Belt-and-suspenders: kill any gamescope or Wine helper processes that
+  # are still associated with our prefix and weren't caught by session kill.
+  # We match by name only — these are safe to kill after the game has exited.
+  pkill -KILL -f "gamescope-wl"    2>/dev/null || true
+  pkill -KILL -f "gamescopereaper" 2>/dev/null || true
+  # Kill winedevice.exe scoped to our WINEPREFIX so other Wine games are safe.
+  pkill -KILL -f "winedevice.exe.*${WINEPREFIX}" 2>/dev/null || true
+
+  # Shut down the wineserver for our prefix only — flushes pending registry
+  # writes and reaps any remaining Wine helper processes.
+  # Scoped by WINEPREFIX so other Wine prefixes and games are unaffected.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
 
-  # Remove temp files we created.
+  # Remove temp files created during this session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
   [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
 }
