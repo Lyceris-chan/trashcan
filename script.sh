@@ -654,14 +654,18 @@ install_sys_deps() {
   fi
 
   # Step 1c — Ensure Python modules (Pillow, blake3, vdf).
-  ensure_python_deps
+  ensure_python_deps "${pkg_mgr}"
 }
 
 # Ensures essential Python modules are installed via pip.
 # Pillow is required for icon extraction, blake3 for update verification,
 # and vdf for Steam integration. We use 'python3 -m pip install --target'
 # to keep these isolated in our local pylibs directory.
+#
+# Arguments:
+#   $1  Package manager name (optional, for install instructions).
 ensure_python_deps() {
+  local -r pkg_mgr="${1:-}"
   step_msg "Step 1c — Verifying Python dependencies (Pillow, blake3, vdf)..."
   
   if ! command_exists python3; then
@@ -676,12 +680,22 @@ ensure_python_deps() {
   if ! python3 -m pip --version >/dev/null 2>&1; then
     info_msg "pip module not found. Attempting to bootstrap via ensurepip..."
     python3 -m ensurepip --user >/dev/null 2>&1 || true
-    # If ensurepip failed, check if 'pip' or 'pip3' binaries exist as fallback.
+    
+    # If ensurepip failed, check for 'pip3' or 'pip' binaries.
     if ! python3 -m pip --version >/dev/null 2>&1; then
-      if command_exists pip3; then pip_cmd="pip3";
-      elif command_exists pip; then pip_cmd="pip";
+      if command_exists pip3; then
+        pip_cmd="pip3"
+      elif command_exists pip; then
+        pip_cmd="pip"
       else
         warn_msg "pip not found. Python modules might be missing."
+        case "${pkg_mgr}" in
+          apt)    info_msg "To install: sudo apt update && sudo apt install python3-pip" ;;
+          pacman) info_msg "To install: sudo pacman -S python-pip" ;;
+          dnf)    info_msg "To install: sudo dnf install python3-pip" ;;
+          zypper) info_msg "To install: sudo zypper install python3-pip" ;;
+          *)      info_msg "Please install the 'pip' package for your Python 3 distribution." ;;
+        esac
         return 0
       fi
     fi
