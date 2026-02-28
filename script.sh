@@ -3762,13 +3762,11 @@ XDLL_B64_EOF
     # live in a theme subdirectory — the DE resolves Icon=cluckers-central
     # (no path, no extension) through the theme cache at runtime.
     #
-    # Icon source: RT_GROUP_ICON resource 1 extracted from the game EXE.
-    # Windows PE executables embed icon groups in a .rsrc resource section.
-    # We parse the PE binary directly in Python (no external tools required):
-    #   RT_GROUP_ICON (type 14, id 1) — manifest listing all frame sizes.
-    #   RT_ICON       (type 3)        — raw DIB bitmap data for each frame.
-    # The game EXE contains multiple frames (32×32, 48×48, 256×256, etc.),
-    # so we get a crisp native icon at every size slot without any upscaling.
+    # Icon source: 1.ico extracted from the game EXE via unzip.
+    # The Realm Royale shipping EXE is packaged in a format that unzip can
+    # read directly. The icon is stored at the path .rsrc/ICON/1.ico inside
+    # the archive and contains multiple frames (32×32, 256×256, etc.),
+    # giving a crisp native icon at every size slot without any upscaling.
     #
     # We install:
     #   hicolor/32x32/apps/cluckers-central.png  — taskbar / panel icon.
@@ -3786,178 +3784,75 @@ XDLL_B64_EOF
     # Download the Steam CDN ICO for shortcuts.vdf (not used as desktop icon).
     curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}" || true
 
-    # Extract the icon group from the game EXE and install it as PNG.
+    # Extract 1.ico from the game EXE and convert to PNG for the desktop icon.
     local _game_exe="${GAME_DIR}/${GAME_EXE_REL}"
+    local _exe_ico="${STEAM_ASSETS_DIR}/icon_exe.ico"
     if [[ ! -f "${_game_exe}" ]]; then
       warn_msg "Game EXE not found — desktop icon cannot be installed yet."
       warn_msg "Re-run setup after downloading the game to install the icon."
+    elif ! command_exists unzip; then
+      warn_msg "unzip not found — desktop icon cannot be installed."
+      warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      python3 - "${_game_exe}" \
-               "${_hicolor_32}/${_icon_name}.png" \
-               "${_hicolor_256}/${_icon_name}.png" \
-               "${ICON_PATH}" << 'ICO2PNG_EOF'
-import struct, sys, shutil
+      # Extract the icon resource from the EXE. unzip -p pipes the file to
+      # stdout; we redirect to a temp ICO file. The -j flag is not needed
+      # since we reference the exact internal path.
+      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${_exe_ico}" 2>/dev/null \
+         && [[ -s "${_exe_ico}" ]]; then
+        ok_msg "Game icon extracted from EXE (.rsrc/ICON/1.ico)."
+
+        # Convert the multi-frame ICO to PNG using Pillow and install it.
+        python3 - "${_exe_ico}" \
+                 "${_hicolor_32}/${_icon_name}.png" \
+                 "${_hicolor_256}/${_icon_name}.png" \
+                 "${ICON_PATH}" << 'ICO2PNG_EOF'
+import sys, shutil
 from PIL import Image
-import io
-
-def extract_pe_group_icon(exe_path, group_id=1):
-    """
-    Extract icon group group_id from a Windows PE executable.
-
-    Parses the PE .rsrc section directly using struct — no external tools
-    needed. Reads RT_GROUP_ICON (type 14) to get the frame manifest, then
-    reads each RT_ICON (type 3) frame and assembles a valid multi-frame ICO.
-    """
-    with open(exe_path, 'rb') as f:
-        data = f.read()
-    if data[:2] != b'MZ':
-        raise ValueError("Not a PE executable (missing MZ header)")
-    pe_off = struct.unpack_from('<I', data, 0x3C)[0]
-    if data[pe_off:pe_off+4] != b'PE\x00\x00':
-        raise ValueError("Invalid PE signature")
-    num_sects = struct.unpack_from('<H', data, pe_off + 6)[0]
-    opt_sz    = struct.unpack_from('<H', data, pe_off + 20)[0]
-    magic     = struct.unpack_from('<H', data, pe_off + 24)[0]
-    is64      = (magic == 0x20B)
-    # Data directory array: each entry is 8 bytes (RVA + size).
-    # Entry index 2 = resource directory.
-    dd_base  = pe_off + 24 + (112 if is64 else 96)
-    rsrc_rva = struct.unpack_from('<I', data, dd_base + 16)[0]
-
-    # Find the section that contains the resource directory.
-    rsrc_vaddr = rsrc_foff = 0
-    sect_base = pe_off + 24 + opt_sz
-    for i in range(num_sects):
-        s   = sect_base + i * 40
-        va  = struct.unpack_from('<I', data, s + 12)[0]
-        rsz = struct.unpack_from('<I', data, s + 16)[0]
-        rof = struct.unpack_from('<I', data, s + 20)[0]
-        if va <= rsrc_rva < va + rsz:
-            rsrc_vaddr, rsrc_foff = va, rof
-            break
-    if rsrc_foff == 0:
-        raise ValueError("No .rsrc section found in PE")
-
-    def rva2off(rva): return rsrc_foff + (rva - rsrc_vaddr)
-
-    def read_dir(off):
-        """Read an IMAGE_RESOURCE_DIRECTORY entry list."""
-        named = struct.unpack_from('<H', data, off + 12)[0]
-        ident = struct.unpack_from('<H', data, off + 14)[0]
-        out = []
-        for i in range(named + ident):
-            e   = off + 16 + i * 8
-            nid = struct.unpack_from('<I', data, e)[0]
-            ofs = struct.unpack_from('<I', data, e + 4)[0]
-            out.append((nid & 0x7FFFFFFF, ofs & 0x7FFFFFFF,
-                        bool(nid & 0x80000000), bool(ofs & 0x80000000)))
-        return out
-
-    def get_resource(type_id, res_id):
-        """Return raw bytes for resource (type_id, res_id), first language."""
-        # Level 1: type directory.
-        type_dir = None
-        for tid, toff, _, is_sub in read_dir(rsrc_foff):
-            if tid == type_id and is_sub:
-                type_dir = rsrc_foff + toff
-                break
-        if type_dir is None:
-            return None
-        # Level 2: ID directory.
-        id_dir = None
-        for rid, roff, _, is_sub in read_dir(type_dir):
-            if rid == res_id and is_sub:
-                id_dir = rsrc_foff + roff
-                break
-        if id_dir is None:
-            return None
-        # Level 3: language — take the first entry.
-        lang_entries = read_dir(id_dir)
-        if not lang_entries:
-            return None
-        _, data_off, _, is_sub = lang_entries[0]
-        if is_sub:
-            return None
-        entry_off = rsrc_foff + data_off
-        rva  = struct.unpack_from('<I', data, entry_off)[0]
-        size = struct.unpack_from('<I', data, entry_off + 4)[0]
-        return data[rva2off(rva):rva2off(rva) + size]
-
-    RT_ICON       = 3
-    RT_GROUP_ICON = 14
-
-    grp = get_resource(RT_GROUP_ICON, group_id)
-    if not grp:
-        raise ValueError(f"RT_GROUP_ICON id={group_id} not found in PE")
-
-    count = struct.unpack_from('<H', grp, 4)[0]
-    frames = []
-    for i in range(count):
-        e       = 6 + i * 14
-        w       = struct.unpack_from('<B', grp, e)[0]
-        h       = struct.unpack_from('<B', grp, e + 1)[0]
-        colors  = struct.unpack_from('<B', grp, e + 2)[0]
-        planes  = struct.unpack_from('<H', grp, e + 4)[0]
-        bpp     = struct.unpack_from('<H', grp, e + 6)[0]
-        icon_id = struct.unpack_from('<H', grp, e + 12)[0]
-        dib = get_resource(RT_ICON, icon_id)
-        if dib is None:
-            continue
-        frames.append((w, h, colors, planes, bpp, dib))
-
-    if not frames:
-        raise ValueError("No icon frames could be extracted from PE")
-
-    # Assemble a valid ICO file from the collected DIB frames.
-    n            = len(frames)
-    data_offset  = 6 + 16 * n
-    hdr  = struct.pack('<HHH', 0, 1, n)
-    dirs = b''
-    imgs = b''
-    for w, h, colors, planes, bpp, dib in frames:
-        dirs += struct.pack('<BBBBHHII', w, h, colors, 0,
-                            planes, bpp, len(dib), data_offset + len(imgs))
-        imgs += dib
-    return hdr + dirs + imgs
 
 try:
-    exe_path = sys.argv[1]
+    ico_path = sys.argv[1]
     out_32   = sys.argv[2]
     out_256  = sys.argv[3]
     out_flat = sys.argv[4]
 
-    ico_bytes = extract_pe_group_icon(exe_path, group_id=1)
-    img = Image.open(io.BytesIO(ico_bytes))
+    img = Image.open(ico_path)
 
-    # Collect all available frame sizes from the ICO.
+    # Collect all frame sizes and sort largest-first.
     if hasattr(img, 'ico') and img.ico.sizes():
         sizes = sorted(img.ico.sizes(), key=lambda s: s[0] * s[1], reverse=True)
     else:
         sizes = [img.size]
 
-    # 32x32 slot: prefer the native 32x32 frame; resize if unavailable.
+    # 32x32 slot: use the smallest native frame >= 32x32; resize if none.
     best_32 = next((s for s in reversed(sizes) if s[0] >= 32), sizes[0])
-    f32 = img.ico.getimage(best_32).convert("RGBA") if hasattr(img, 'ico') else img.convert("RGBA")
+    f32 = img.ico.getimage(best_32).convert("RGBA") if hasattr(img, 'ico') \
+          else img.convert("RGBA")
     if f32.size != (32, 32):
         f32 = f32.resize((32, 32), Image.LANCZOS)
     f32.save(out_32, "PNG")
 
-    # 256x256 slot: use the largest available frame, resize to exactly 256x256.
+    # 256x256 slot: largest available frame, resized to exactly 256x256.
     largest = sizes[0]
-    fl = img.ico.getimage(largest).convert("RGBA") if hasattr(img, 'ico') else img.convert("RGBA")
+    fl = img.ico.getimage(largest).convert("RGBA") if hasattr(img, 'ico') \
+         else img.convert("RGBA")
     fl.resize((256, 256), Image.LANCZOS).save(out_256, "PNG")
+
+    # Flat fallback: some DEs resolve Icon= by absolute path before the theme.
     shutil.copy2(out_256, out_flat)
 
-    print(f"[icon] Installed from game EXE: {largest[0]}x{largest[1]} largest frame "
-          f"→ hicolor 32x32, 256x256, flat fallback.")
+    print(f"[icon] {largest[0]}x{largest[1]} frame → hicolor 32x32, 256x256 + flat fallback.")
     sys.exit(0)
 except Exception as e:
-    print(f"[icon] Failed to extract icon from game EXE: {e}", file=sys.stderr)
+    print(f"[icon] ICO to PNG conversion failed: {e}", file=sys.stderr)
     sys.exit(1)
 ICO2PNG_EOF
-      if [[ $? -ne 0 ]]; then
+        if [[ $? -ne 0 ]]; then
+          warn_msg "ICO to PNG conversion failed — install Pillow: pip install pillow"
+        fi
+        rm -f "${_exe_ico}"
+      else
+        rm -f "${_exe_ico}"
         warn_msg "Could not extract icon from game EXE — desktop icon will be missing."
-        warn_msg "Ensure python3 and Pillow (pip install pillow) are available."
       fi
     fi
 
