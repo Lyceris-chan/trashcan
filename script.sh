@@ -3794,9 +3794,29 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${_exe_ico}" 2>/dev/null \
-         && [[ -s "${_exe_ico}" ]]; then
-        # Convert the largest ICO frame to PNG using Pillow.
+      # The EXE stores each icon frame as a separate .rsrc/ICON/<id>.ico
+      # entry. Entry 1.ico may be only 32x32. List all entries and extract
+      # the one with the largest file size — that is the highest resolution.
+      local _best_ico="" _best_size=0 _entry _sz
+      while IFS= read -r _entry; do
+        [[ -z "${_entry}" ]] && continue
+        unzip -p "${_game_exe}" "${_entry}" > "${_exe_ico}.tmp" 2>/dev/null \
+          || { rm -f "${_exe_ico}.tmp"; continue; }
+        _sz=$(stat -c '%s' "${_exe_ico}.tmp" 2>/dev/null || echo 0)
+        if (( _sz > _best_size )); then
+          _best_size=${_sz}
+          _best_ico="${_entry}"
+          mv "${_exe_ico}.tmp" "${_exe_ico}"
+        else
+          rm -f "${_exe_ico}.tmp"
+        fi
+      done < <(unzip -l "${_game_exe}" 2>/dev/null \
+               | awk '{print $NF}' \
+               | grep -E '\.rsrc/ICON/[0-9]+\.ico$')
+
+      if [[ -s "${_exe_ico}" ]]; then
+        ok_msg "Game icon extracted from EXE (${_best_ico:-unknown}, ${_best_size} bytes)."
+        # Convert the extracted single-frame ICO to PNG using Pillow.
         python3 - "${_exe_ico}" "${ICON_PATH}" \
                    "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png" << 'ICO2PNG_EOF'
 import sys, shutil
@@ -3804,22 +3824,11 @@ from PIL import Image
 ico  = sys.argv[1]
 flat = sys.argv[2]
 hi   = sys.argv[3]
-img  = Image.open(ico)
-# Iterate all frames to find the largest by pixel area.
-# img.seek(i) navigates to frame i; img.size gives its dimensions.
-# This is more reliable than img.ico.getimage() which re-opens the file.
-best = img
-best_area = img.size[0] * img.size[1]
-for i in range(1, getattr(img, 'n_frames', 1)):
-    img.seek(i)
-    area = img.size[0] * img.size[1]
-    if area > best_area:
-        best_area = area
-        best = img.copy()
-best = best.convert("RGBA")
-best.save(flat, "PNG")
+# Each .rsrc/ICON/<id>.ico is a single-frame DIB — open and convert directly.
+img = Image.open(ico).convert("RGBA")
+img.save(flat, "PNG")
 shutil.copy2(flat, hi)
-print(f"[icon] {best.width}x{best.height} PNG installed.")
+print(f"[icon] {img.width}x{img.height} PNG installed.")
 ICO2PNG_EOF
         if [[ $? -eq 0 ]]; then
           ok_msg "Game icon installed at ${ICON_PATH}."
@@ -4299,22 +4308,26 @@ _cleanup() {
   # scan /proc directly using fixed-string grep to avoid false positives.
   # wineserver is a daemon not a child of gamescope, so session/group kills
   # above do not reach it — we must kill it explicitly here.
-  local _pid_path _pid _cmdline
-  for _pid_path in /proc/[0-9]*/cmdline; do
-    _cmdline=$(tr '\0' ' ' < "${_pid_path}" 2>/dev/null) || continue
-    case "${_cmdline}" in
-      *winedevice.exe*|*wineserver*|*services.exe*|*plugplay.exe*|*svchost.exe*)
-        if printf '%s' "${_cmdline}" | grep -qF "${WINEPREFIX}"; then
-          # Extract the numeric PID from /proc/PID/cmdline.
-          _pid="${_pid_path%/cmdline}"
-          _pid="${_pid##/proc/}"
-          kill -KILL "${_pid}" 2>/dev/null || true
-        fi
-        ;;
-    esac
+  # Kill Wine helper processes (winedevice.exe, wineserver, services.exe, etc.)
+  # that belong to our WINEPREFIX. These are daemon processes — they are NOT
+  # children of gamescope and are not in its session or process group, so the
+  # kill -- -PID and pkill -s calls above do not reach them.
+  #
+  # WINEPREFIX is set as an environment variable, not a command-line argument,
+  # so it appears in /proc/PID/environ rather than /proc/PID/cmdline.
+  # We scan /proc/PID/environ with fixed-string (grep -F) matching to avoid
+  # regex false-positives from dots and slashes in the WINEPREFIX path.
+  local _pid_path _pid _environ
+  for _pid_path in /proc/[0-9]*/environ; do
+    _environ=$(tr '\0' '\n' < "${_pid_path}" 2>/dev/null) || continue
+    if printf '%s' "${_environ}" | grep -qF "WINEPREFIX=${WINEPREFIX}"; then
+      _pid="${_pid_path%/environ}"
+      _pid="${_pid##/proc/}"
+      kill -KILL "${_pid}" 2>/dev/null || true
+    fi
   done
 
-  # Shut down the wineserver for our prefix gracefully first, then force-kill.
+  # Shut down the wineserver for our prefix to flush pending registry writes.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
   sleep 0.3
 
