@@ -175,12 +175,12 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-# Desktop icon: the ICO extracted directly from the game EXE via unzip.
-# The ICO contains multiple frames (32×32, 256×256, etc.) so it renders
-# crisply at all sizes. Modern Linux DEs (GNOME, KDE Plasma, XFCE 4.16+)
-# support ICO files natively when referenced by absolute path in Icon=.
-# The Steam shortcuts.vdf "icon" field also expects an ICO path.
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.ico"  # game icon (ICO for Icon= and shortcuts.vdf)
+# Desktop icon: PNG converted from the ICO embedded in the game EXE.
+# The ICO is extracted via unzip and its largest frame converted to PNG
+# using Pillow. PNG is used because most Linux DEs do not render ICO
+# files reliably via absolute path in Icon=. The Steam shortcuts.vdf
+# "icon" field uses STEAM_ICO_PATH (the CDN ICO) instead.
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"  # game icon (PNG for .desktop Icon= field)
 readonly ICON_POSTER_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster (600×900), Steam grid only
 
 readonly APP_NAME="Cluckers Central"
@@ -3780,10 +3780,13 @@ XDLL_B64_EOF
     # Extract the game icon from the EXE and install it as the desktop icon.
     # The Realm Royale EXE stores its icon at .rsrc/ICON/1.ico in a format
     # that unzip can read directly. The ICO contains multiple frames
-    # (32×32, 256×256, etc.) and is installed as-is — no conversion needed.
-    # Modern Linux DEs (GNOME, KDE Plasma, XFCE 4.16+) render ICO files
-    # natively when referenced by absolute path in the Icon= field.
+    # (32×32, 256×256, etc.). We convert the largest frame to PNG using
+    # Pillow because most Linux DEs do not render ICO reliably via Icon=.
+    # The PNG is installed to ICON_PATH and also into the hicolor theme so
+    # the DE finds it by name (Icon=cluckers-central in the .desktop file).
     local _game_exe="${GAME_DIR}/${GAME_EXE_REL}"
+    local _exe_ico="${STEAM_ASSETS_DIR}/icon_exe.ico"
+    mkdir -p "${ICON_DIR}/hicolor/256x256/apps"
     if [[ ! -f "${_game_exe}" ]]; then
       warn_msg "Game EXE not found — desktop icon cannot be installed yet."
       warn_msg "Re-run setup after downloading the game to install the icon."
@@ -3791,13 +3794,41 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${ICON_PATH}" 2>/dev/null \
-         && [[ -s "${ICON_PATH}" ]]; then
-        ok_msg "Game icon installed at ${ICON_PATH}."
+      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${_exe_ico}" 2>/dev/null \
+         && [[ -s "${_exe_ico}" ]]; then
+        # Convert the largest ICO frame to PNG using Pillow.
+        python3 - "${_exe_ico}" "${ICON_PATH}" \
+                   "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png" << 'ICO2PNG_EOF'
+import sys, shutil
+from PIL import Image
+ico  = sys.argv[1]
+flat = sys.argv[2]
+hi   = sys.argv[3]
+img  = Image.open(ico)
+# Pick the largest available frame from the multi-frame ICO.
+if hasattr(img, 'ico') and img.ico.sizes():
+    largest = max(img.ico.sizes(), key=lambda s: s[0] * s[1])
+    img = img.ico.getimage(largest)
+img = img.convert("RGBA")
+img.save(flat, "PNG")
+shutil.copy2(flat, hi)
+print(f"[icon] {img.width}x{img.height} PNG installed.")
+ICO2PNG_EOF
+        if [[ $? -eq 0 ]]; then
+          ok_msg "Game icon installed at ${ICON_PATH}."
+        else
+          warn_msg "ICO to PNG conversion failed — install Pillow: pip install pillow"
+        fi
+        rm -f "${_exe_ico}"
       else
-        rm -f "${ICON_PATH}"
+        rm -f "${_exe_ico}"
         warn_msg "Could not extract icon from game EXE — desktop icon will be missing."
       fi
+    fi
+
+    # Refresh the icon theme cache so the new icon appears immediately.
+    if command_exists gtk-update-icon-cache; then
+      gtk-update-icon-cache -f -t "${ICON_DIR}/hicolor" 2>/dev/null || true
     fi
 
     # Copy the portrait poster to ICON_POSTER_PATH for Steam grid artwork only.
@@ -4367,7 +4398,7 @@ Name=${APP_NAME}
 Comment=Play Cluckers Central (Realm Royale) on Linux
 Exec=${LAUNCHER_SCRIPT}
 Path=${HOME}/.local/bin
-Icon=${ICON_PATH}
+Icon=cluckers-central
 Terminal=false
 Type=Application
 Categories=Game;
