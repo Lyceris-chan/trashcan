@@ -662,7 +662,7 @@ install_sys_deps() {
 # and vdf for Steam integration. We use 'python3 -m pip install --target'
 # to keep these isolated in our local pylibs directory.
 ensure_python_deps() {
-  step_msg "Step 1c — Ensuring Python dependencies (Pillow, blake3, vdf)..."
+  step_msg "Step 1c — Verifying Python dependencies (Pillow, blake3, vdf)..."
   
   if ! command_exists python3; then
     warn_msg "python3 not found — skipping Python dependency check."
@@ -2866,7 +2866,7 @@ EOF
   # Note: This step requires 'sudo' (administrator) privileges to install
   # system-wide tools like Wine.
   # --------------------------------------------------------------------------
-  step_msg "Step 1 — Checking system tools..."
+  step_msg "Step 1 — Verifying system tools..."
 
   if [[ -e /dev/uinput ]] && [[ ! -w /dev/uinput ]]; then
     warn_msg "Access to /dev/uinput is restricted (systemd v258+ policy)."
@@ -3230,27 +3230,27 @@ EOF
   #            Source: https://github.com/Winetricks/winetricks/blob/master/src/winetricks
   #                    w_metadata d3dx11_43 installed_file1=d3dx11_43.dll
   # --------------------------------------------------------------------------
-  step_msg "Step 4 — Installing Windows runtime libraries..."
+  step_msg "Step 4 — Configuring Windows runtime environment..."
 
   # Kill any orphaned wineserver from previous steps before running winetricks.
   env WINEPREFIX="${WINEPREFIX}" "${maint_server}" -k 2>/dev/null || true
 
   install_winetricks_multi \
-    "Windows runtime libraries" \
+    "Windows runtime environment" \
     "${maint_wine}" \
     "${maint_server}" \
     "${auto_mode}" \
     "vcrun2010" "vcrun2012" "vcrun2019" "dxvk" "d3dx11_43"
 
   # --------------------------------------------------------------------------
-  # Step 5 — Download and verify game files
+  # Step 5 — Synchronizing game content
   #
   # Downloads the game zip (~5.3 GB) from the update server with resume
   # support (if a previous download was interrupted it continues from where
   # it stopped). After download the BLAKE3 hash is verified against the
   # value from version.json to confirm the download is intact.
   # --------------------------------------------------------------------------
-  step_msg "Step 5 — Downloading game files..."
+  step_msg "Step 5 — Synchronizing game content..."
 
   mkdir -p "${GAME_DIR}"
 
@@ -3274,7 +3274,7 @@ EOF
 
   local local_game_exe="${GAME_DIR}/${GAME_EXE_REL}"
   if [[ -f "${local_game_exe}" ]]; then
-    ok_msg "Game files already present at ${GAME_DIR} — skipping download."
+    ok_msg "Game files already present at ${GAME_DIR} — skipping synchronization."
   else
     info_msg "Downloading game zip from ${zip_url}"
     info_msg "(This is ~5.3 GB — it may take a while on slower connections.)"
@@ -3793,19 +3793,19 @@ XDLL_B64_EOF
   fi
 
     # --------------------------------------------------------------------------
-  # Step 7 — Downloading high-quality game assets
+  # Step 7 — Synchronizing game assets
   #
   # Fetches high-quality icons, grid art, and hero images from Steam's CDN.
   # These are used for both the desktop shortcut and the Steam non-Steam game
   # entry for a professional look.
   # --------------------------------------------------------------------------
-  step_msg "Step 7 — Downloading game assets..."
+  step_msg "Step 7 — Synchronizing game assets..."
 
   mkdir -p "${ICON_DIR}"
   mkdir -p "${STEAM_ASSETS_DIR}"
 
   if command_exists curl; then
-    info_msg "Downloading high-quality assets from Steam CDN..."
+    info_msg "Synchronizing assets from Steam CDN..."
 
     # Download each asset individually so a single failure doesn't abort the rest.
     # '|| true' ensures the script continues even if the CDN is temporarily down.
