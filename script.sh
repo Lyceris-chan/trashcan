@@ -217,8 +217,10 @@ readonly STEAM_ASSET_BASE="https://shared.fastly.steamstatic.com/store_item_asse
 #   hero_capsule.jpg         — secondary hero capsule art (JPG,  ~86 KB)
 #
 # The icon: Steam's community .ico is only a 32×32 BMP (4 KB). We instead
-# use logo_2x.png (already downloaded below) as the desktop and Steam icon
-# because it is full-resolution and renders crisply at any size.
+# use the portrait poster (library_600x900_2x.jpg, already downloaded as grid.jpg)
+# as the desktop and Steam shortcut icon. logo_2x.png is a wide transparent
+# overlay — it looks squished in square icon slots. The portrait poster has
+# the game's key art and renders correctly at any icon size.
 readonly STEAM_LOGO_URL="${STEAM_ASSET_BASE}/logo_2x.png?t=1739811771"
 readonly STEAM_GRID_URL="${STEAM_ASSET_BASE}/library_600x900_2x.jpg?t=1739811771"
 readonly STEAM_HERO_URL="${STEAM_ASSET_BASE}/library_hero_2x.jpg?t=1739811771"
@@ -1207,18 +1209,19 @@ _WARN = "  [\033[1;33mWARN\033[0m]"
 def compute_shortcut_id(exe: str, name: str) -> int:
     """Return the Steam non-Steam shortcut ID for the given exe + name pair.
 
-    Steam uses a CRC32 hash of the concatenated exe path and display name to
-    identify non-Steam shortcuts. We reproduce this calculation to locate and
-    remove the correct entry during uninstall.
+    Steam stores Exe in shortcuts.vdf as a quoted string and computes the
+    shortcut ID from the quoted form. We must use the same quoted form here
+    so the uninstall removes the correct entry.
 
     Args:
-        exe:  Absolute path to the launcher script or executable.
+        exe:  Absolute path to the launcher script or executable (unquoted).
         name: Display name used when the shortcut was added.
 
     Returns:
         Unsigned 32-bit shortcut ID.
     """
-    crc = binascii.crc32((exe + name).encode("utf-8")) & 0xFFFFFFFF
+    quoted = f'"{exe}"'
+    crc = binascii.crc32((quoted + name).encode("utf-8")) & 0xFFFFFFFF
     return (crc | 0x80000000) & 0xFFFFFFFF
 
 
@@ -3748,15 +3751,17 @@ XDLL_B64_EOF
     # full-resolution transparent PNG that renders crisply at any size.
     curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}" || true
 
-    # Copy the logo PNG as the desktop application icon. The .desktop spec
-    # supports any image format that the desktop environment's icon theme can
-    # load; PNG is universally supported by GNOME, KDE, XFCE, and others.
-    if [[ -f "${STEAM_LOGO_PATH}" ]]; then
-      cp "${STEAM_LOGO_PATH}" "${STEAM_ICON_PNG_PATH}"
+    # Use the portrait poster (600×900) as the desktop and Steam shortcut icon.
+    # logo_2x.png is a wide transparent overlay designed to sit on top of the
+    # library art — it is NOT a square icon and looks squished in icon slots.
+    # The portrait poster has the game's key art and displays correctly at any
+    # icon size. It is the best available standalone image for this purpose.
+    if [[ -f "${STEAM_GRID_PATH}" ]]; then
+      cp "${STEAM_GRID_PATH}" "${STEAM_ICON_PNG_PATH}"
       cp "${STEAM_ICON_PNG_PATH}" "${ICON_PATH}"
       ok_msg "High-quality Steam assets downloaded."
     else
-      warn_msg "Logo PNG unavailable — desktop shortcut will use a fallback icon."
+      warn_msg "Portrait poster unavailable — desktop shortcut will use a fallback icon."
     fi
   fi
 
@@ -4418,10 +4423,16 @@ _WARN = "  [\033[1;33mWARN\033[0m]"
 def compute_shortcut_id(exe: str, name: str) -> int:
     """Return the Steam non-Steam shortcut ID for the given exe + name pair.
 
-    Steam uses CRC32 of the concatenated exe path and display name to identify
-    non-Steam shortcuts. The high bit is always set.
+    Steam stores the Exe field in shortcuts.vdf as a QUOTED string, e.g.:
+        '"/home/user/.local/bin/cluckers-central.sh"'
+    When Steam recomputes the shortcut ID internally it uses the QUOTED form.
+    So the CRC must be computed from the quoted exe path, not the raw path.
+    This is how steam-rom-manager and Heroic compute the ID.
+
+    Source: https://github.com/nicowillis/steam-rom-manager — generateAppId.ts
     """
-    crc = binascii.crc32((exe + name).encode("utf-8")) & 0xFFFFFFFF
+    quoted = f'"{exe}"'
+    crc = binascii.crc32((quoted + name).encode("utf-8")) & 0xFFFFFFFF
     return (crc | 0x80000000) & 0xFFFFFFFF
 
 
@@ -4458,14 +4469,18 @@ try:
     # Source: Valve's internal format, reproduced by steam-rom-manager.
     quoted_exe = f'"{LAUNCHER}"'
     start_dir  = f'"{os.path.dirname(LAUNCHER)}"'
-    # Prefer the extracted PNG for the icon field — it renders at full
-    # resolution in the Steam library. Fall back to the raw .ico if PNG
-    # extraction did not run (e.g. no Python during asset download step).
+    # Use the portrait poster (600×900) as the icon — it renders correctly in
+    # square icon slots. The wide logo overlay would appear squished.
     icon_path = (
         STEAM_ICON_PNG
         if STEAM_ICON_PNG and os.path.exists(STEAM_ICON_PNG)
         else os.environ.get("STEAM_ICON_PATH_ENV", ICON_PATH)
     )
+    # LaunchOptions: leave empty — the launcher script handles gamescope
+    # and all launch arguments internally. Putting gamescope here would cause
+    # it to run twice when launched from Steam (once from Steam's LaunchOptions
+    # and once from the launcher script itself).
+    launch_opts = ""
 
     next_key = str(len(sc))
     sc[next_key] = {
@@ -4475,7 +4490,7 @@ try:
         "StartDir":           start_dir,
         "icon":               icon_path,
         "ShortcutPath":       "",
-        "LaunchOptions":      "",
+        "LaunchOptions":      launch_opts,
         "IsHidden":           0,
         "AllowDesktopConfig": 1,
         "AllowOverlay":       1,
