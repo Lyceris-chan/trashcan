@@ -4406,38 +4406,34 @@ _kill_session() {
   # Kill the entire process group (negative PID = group leader).
   # setsid makes the launched process both session leader and process group
   # leader (PGID == PID), so kill -- -PID reaches all processes in the group.
-  kill -TERM -- "-${pid}" 2>/dev/null || true
+  # We use -9 (SIGKILL) immediately for children to ensure Steam doesn't linger.
+  kill -KILL -- "-${pid}" 2>/dev/null || true
 
   # Also kill by session ID — catches processes that called setsid themselves.
-  pkill -TERM -s "${pid}" 2>/dev/null || true
+  pkill -KILL -s "${pid}" 2>/dev/null || true
 
   # Kill by parent PID as an additional sweep for any orphaned children.
-  pkill -TERM -P "${pid}" 2>/dev/null || true
+  pkill -KILL -P "${pid}" 2>/dev/null || true
 
-  # Wait up to 3 seconds for the process group leader to exit cleanly.
+  # Wait up to 1 second for the process group leader to exit.
   local _w=0
-  while kill -0 "${pid}" 2>/dev/null && (( _w < 30 )); do
+  while kill -0 "${pid}" 2>/dev/null && (( _w < 10 )); do
     sleep 0.1; (( _w++ )) || true
   done
 
-  # Force-kill any survivors.
-  kill -KILL -- "-${pid}" 2>/dev/null || true
-  pkill -KILL -s "${pid}" 2>/dev/null || true
-  pkill -KILL -P "${pid}" 2>/dev/null || true
+  # Force-kill leader if still alive.
+  kill -KILL "${pid}" 2>/dev/null || true
 }
 
 _cleanup() {
   # Remove the trap to prevent recursion if _cleanup is called more than once.
   trap '' EXIT INT TERM HUP
 
-  # Step 1: Kill gamescope-wl and gamescopereaper by name first.
-  # gamescope spawns these as children with their own sessions, so session-
-  # based kills do not reach them. Kill them before wineserver shutdown to
-  # prevent them from keeping a second winedevice.exe alive.
-  # gamescope-wl (12 chars) fits in the 15-char comm field — use -x.
-  # gamescopereaper (16 chars) is truncated to 15 in comm — use -f.
-  pkill -KILL -x "gamescope-wl"    2>/dev/null || true
-  pkill -KILL -f "gamescopereaper" 2>/dev/null || true
+  # Step 1: Kill gamescope components explicitly by name.
+  # Steam tracks these; they MUST be gone for Steam to stop the 'Running' state.
+  pkill -9 -x "gamescope-wl"    2>/dev/null || true
+  pkill -9 -f "gamescopereaper" 2>/dev/null || true
+  pkill -9 -x "Xwayland"        2>/dev/null || true
 
   # Step 2: Kill gamescope and Wine process groups and sessions.
   # By the time _cleanup runs gamescope may have already exited cleanly.
@@ -4447,14 +4443,17 @@ _cleanup() {
 
   # Step 3: Graceful wineserver shutdown — terminates winedevice.exe,
   # services.exe, plugplay.exe and all Wine helpers for our specific prefix.
-  # This is the standard, safe way to shut down Wine without side effects.
+  # Followed by -9 to ensure winedevice.exe doesn't hang Steam.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
-  sleep 0.5
+  pkill -9 -f "winedevice.exe" 2>/dev/null || true
+  
+  # Step 4: Wait for wineserver to fully stop.
+  WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -w 2>/dev/null || true
 
-  # Step 4: Final sweep for any orphans specifically in our session.
+  # Step 5: Final sweep for any orphans specifically in our session.
   _kill_session "${_WINE_PID:-}"
 
-  # Step 5: Remove temp files created during this launcher session.
+  # Step 6: Remove temp files created during this launcher session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
   [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
 }
