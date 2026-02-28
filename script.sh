@@ -179,7 +179,12 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster, high-res desktop icon
+# Desktop icon: use the authoritative 32×32 ICO from Steam's community assets.
+# ICO is natively supported by all major Linux desktop environments (GNOME, KDE,
+# XFCE) via absolute path in Icon=. Stored alongside the portrait poster so
+# both are available (portrait poster is used for Steam grid p-suffix artwork).
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.ico"  # game icon (32×32 ICO, Steam community assets)
+readonly ICON_POSTER_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster (600×900), Steam grid only
 
 readonly APP_NAME="Cluckers Central"
 
@@ -1142,13 +1147,15 @@ run_uninstall() {
     "${LAUNCHER_SCRIPT}"
     "${DESKTOP_FILE}"
     "${ICON_PATH}"
+    "${ICON_POSTER_PATH}"
     "${TOOLS_DIR}/shm_launcher.exe"
     "${TOOLS_DIR}/xinput1_3.dll"
   )
   local -a labels=(
     "Launcher script"
     "Desktop shortcut"
-    "Icon"
+    "Icon (ICO)"
+    "Icon (portrait poster)"
     "shm_launcher.exe"
     "xinput1_3.dll"
   )
@@ -3762,18 +3769,26 @@ XDLL_B64_EOF
     curl ${CURL_FLAGS}f -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" || true
 
     # Download the game's ICO from Steam's community assets (32×32, authoritative
-    # game icon). Used as the shortcuts.vdf "icon" field — Steam and Linux
-    # desktops both natively handle ICO format.
-    curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}" || true
+    # game icon). Used as both:
+    #   • shortcuts.vdf "icon" field (Steam shortcut icon)
+    #   • desktop .desktop Icon= field (taskbar, launcher, alt-tab icon)
+    # ICO is natively handled by Steam and all major Linux desktop environments.
+    mkdir -p "${ICON_DIR}"
+    if curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}"; then
+      # Also place the ICO at ICON_PATH (which IS STEAM_ICO_PATH for .desktop use).
+      # ICON_PATH == "${ICON_DIR}/cluckers-central.ico"
+      [[ "${STEAM_ICO_PATH}" != "${ICON_PATH}" ]] && cp "${STEAM_ICO_PATH}" "${ICON_PATH}"
+    else
+      warn_msg "Could not download game ICO — desktop icon will use fallback."
+    fi
 
-    # Use the portrait poster (library_600x900_2x.jpg, already downloaded as
-    # STEAM_GRID_PATH) as the desktop .desktop icon. It is high-res key art
-    # (600×900) that scales well at any size.
+    # Copy the portrait poster (600×900) to ICON_POSTER_PATH for Steam grid use.
+    # It is NOT used as the desktop icon (the ICO is used instead).
     if [[ -f "${STEAM_GRID_PATH}" ]]; then
-      cp "${STEAM_GRID_PATH}" "${ICON_PATH}"
+      cp "${STEAM_GRID_PATH}" "${ICON_POSTER_PATH}"
       ok_msg "High-quality Steam assets downloaded."
     else
-      warn_msg "Grid poster unavailable — desktop shortcut will use a fallback icon."
+      warn_msg "Grid poster unavailable — portrait poster slot will be empty."
     fi
   fi
 
@@ -4212,23 +4227,46 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   _game_args+=("-content_bootstrap_shm=${_shm_name}")
 fi
 
-# Cleanup: kill gamescope and wineserver when the game exits, regardless of
-# how it exits (normal close, crash, or signal).
+# Cleanup: kill only what we spawned when the game exits, crashes, or is closed
+# externally (e.g. via Steam's stop button or a SIGTERM from the Steam reaper).
+# We intentionally avoid killing all shell background jobs (jobs -p) because
+# that could hit unrelated processes when launched through Steam's runtime.
 _cleanup() {
   trap '' EXIT INT TERM HUP
-  # Kill gamescope if it is still running.
+
+  # Kill the gamescope process GROUP (negative PID = whole group).
+  # gamescope sets itself as group leader, so wine and its children are in the
+  # same group. Sending SIGTERM to -PID kills gamescope + wine + children all at
+  # once, then SIGKILL after 3 s to catch anything that ignored SIGTERM.
   if [[ -n "${_GS_PID:-}" ]]; then
-    kill "${_GS_PID}" 2>/dev/null || true
+    # Send SIGTERM to the whole process group.
+    kill -- "-${_GS_PID}" 2>/dev/null || true
+    # Wait up to 3 seconds then force-kill any survivors.
+    local _waited=0
+    while kill -0 "${_GS_PID}" 2>/dev/null && (( _waited < 30 )); do
+      sleep 0.1
+      (( _waited++ )) || true
+    done
+    kill -9 -- "-${_GS_PID}" 2>/dev/null || true
   fi
-  # Kill all background jobs (wine, etc.)
-  local pids
-  pids=$(jobs -p)
-  if [[ -n "${pids}" ]]; then
-    # shellcheck disable=SC2086
-    kill ${pids} 2>/dev/null || true
+
+  # If wine was run directly (no gamescope), kill it and its children using the
+  # Wine PID we captured.
+  if [[ -n "${_WINE_PID:-}" ]]; then
+    kill -- "-${_WINE_PID}" 2>/dev/null || true
+    local _waited=0
+    while kill -0 "${_WINE_PID}" 2>/dev/null && (( _waited < 30 )); do
+      sleep 0.1
+      (( _waited++ )) || true
+    done
+    kill -9 -- "-${_WINE_PID}" 2>/dev/null || true
   fi
-  # Clean up the Wine server for this prefix.
-  "${WINESERVER}" -k 2>/dev/null || true
+
+  # Shut down the wineserver for OUR prefix only.
+  # Passing WINEPREFIX scopes the kill to this prefix's socket; it will not
+  # affect other Wine prefixes or games running concurrently.
+  WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
+
   # Remove temp files we created.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
   [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
@@ -4249,6 +4287,10 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   # Launch via shm_launcher.exe: writes bootstrap blob to shared memory then
   # the game process starts.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
+    # gamescope becomes process group leader; its children (wine, game) are in
+    # the same group so _cleanup can kill them all with kill -- -${_GS_PID}.
+    # DBUS_SESSION_BUS_ADDRESS=/dev/null prevents gamescope from connecting to
+    # an existing D-Bus session and interfering with the desktop environment.
     # shellcheck disable=SC2086
     DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
       "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
@@ -4257,9 +4299,15 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
+    # Run wine in its own process group (setsid) so _cleanup can kill wine and
+    # all its children (winedevice, services.exe, the game) with kill -- -PID
+    # without touching any other processes in our shell session (e.g. Steam's
+    # reaper, pressure-vessel, or other games).
+    setsid "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
-      "${_game_args[@]}"
+      "${_game_args[@]}" &
+    _WINE_PID=$!
+    wait "${_WINE_PID}"
   fi
 else
   # No bootstrap data available — launch the game directly without shared memory.
@@ -4269,7 +4317,9 @@ else
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}"
+    setsid "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
+    _WINE_PID=$!
+    wait "${_WINE_PID}"
   fi
 fi
 
@@ -4480,7 +4530,9 @@ try:
     # read by both Steam (shortcuts.vdf "icon" field) and Linux desktop
     # environments (XDG icon theme). Falls back to the portrait poster if the
     # ICO was not downloaded successfully.
-    # The desktop .desktop icon (ICON_PATH) uses the portrait poster (600×900).
+    # The desktop .desktop Icon= field uses ICON_PATH (the 32×32 ICO).
+    # Fallback to ICON_PATH (ICO) if STEAM_ICO env var is not set, then to the
+    # portrait poster as a last resort.
     icon_path = STEAM_ICO if STEAM_ICO and os.path.exists(STEAM_ICO) else ICON_PATH
     # LaunchOptions: leave empty — the launcher script handles gamescope
     # and all launch arguments internally. Putting gamescope here would cause
