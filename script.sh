@@ -3775,53 +3775,77 @@ XDLL_B64_EOF
     # icon Steam itself uses). The ICO is kept for the Steam shortcuts.vdf "icon"
     # field. For the .desktop file we need a PNG — most Linux desktop environments
     # (GNOME, KDE, XFCE) do not render .ico files reliably via absolute path.
-    mkdir -p "${ICON_DIR}"
+    # Install the game icon into the XDG hicolor theme so every desktop
+    # environment (GNOME, KDE, XFCE) finds it reliably by name rather than
+    # by absolute path. An absolute path to a plain file in ~/.local/share/icons/
+    # is not reliably picked up — it must be in a theme subdirectory.
+    # We install at 32x32 (matching the ICO) and also at 256x256 scaled from
+    # the portrait poster so high-DPI desktops get a crisp large icon.
+    local _hicolor_32="${ICON_DIR}/hicolor/32x32/apps"
+    local _hicolor_256="${ICON_DIR}/hicolor/256x256/apps"
+    local _icon_name="cluckers-central"  # used in Icon= field (no path, no ext)
+    mkdir -p "${_hicolor_32}" "${_hicolor_256}"
+
     if curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}"; then
       ok_msg "Game ICO downloaded (used for Steam shortcut icon)."
-      # Extract the highest-quality frame from the ICO as a PNG for the desktop icon.
-      # Uses Python/Pillow — already a required dependency — keeping this portable
-      # without needing ImageMagick. Pillow picks the largest embedded frame automatically.
-      python3 - "${STEAM_ICO_PATH}" "${ICON_PATH}" << 'ICO2PNG_EOF' || true
+      # Convert ICO → PNG and install into hicolor theme at 32x32.
+      python3 - "${STEAM_ICO_PATH}" "${_hicolor_32}/${_icon_name}.png" << 'ICO2PNG_EOF' || true
 import sys
 try:
     from PIL import Image
     ico, out = sys.argv[1], sys.argv[2]
-    # Open the ICO and pick the largest embedded frame by area.
     img = Image.open(ico)
     if hasattr(img, 'ico') and img.ico.sizes():
         best = max(img.ico.sizes(), key=lambda s: s[0] * s[1])
         img = img.ico.getimage(best)
     img = img.convert("RGBA")
     img.save(out, "PNG")
-    print(f"[icon] Saved {img.width}x{img.height} PNG from ICO.")
+    print(f"[icon] Installed {img.width}x{img.height} icon to hicolor theme.")
 except ImportError:
-    sys.exit(1)  # Pillow not available — falls through to JPG fallback
+    sys.exit(1)
 except Exception as e:
     print(f"[icon] ICO->PNG failed: {e}", file=sys.stderr)
     sys.exit(1)
 ICO2PNG_EOF
-      if [[ -f "${ICON_PATH}" ]]; then
-        ok_msg "Game icon extracted as PNG for desktop shortcut."
-      else
-        warn_msg "Pillow not available or ICO extraction failed — will fall back to portrait poster."
-      fi
     else
-      warn_msg "Could not download game ICO — desktop icon will use fallback."
+      warn_msg "Could not download game ICO — desktop icon will use portrait poster fallback."
     fi
 
-    # Copy the portrait poster (600×900) to ICON_POSTER_PATH for Steam grid use.
-    # Also use it as the desktop PNG icon if the ICO extraction above didn't produce one
-    # (either because the ICO download failed or ImageMagick is not installed).
+    # Copy the portrait poster (600×900) to ICON_POSTER_PATH for Steam grid use
+    # and also install a scaled copy into hicolor/256x256 for high-DPI desktops.
     if [[ -f "${STEAM_GRID_PATH}" ]]; then
       cp "${STEAM_GRID_PATH}" "${ICON_POSTER_PATH}"
-      # Use the portrait poster as the desktop icon fallback if PNG is still missing.
-      if [[ ! -f "${ICON_PATH}" ]]; then
-        cp "${STEAM_GRID_PATH}" "${ICON_PATH}"
-        ok_msg "Using portrait poster as desktop icon fallback."
+      # Scale portrait poster to 256x256 PNG for high-DPI icon slot.
+      python3 - "${STEAM_GRID_PATH}" "${_hicolor_256}/${_icon_name}.png" << 'SCALE256_EOF' || \
+        cp "${STEAM_GRID_PATH}" "${_hicolor_256}/${_icon_name}.png" || true
+import sys
+try:
+    from PIL import Image
+    img = Image.open(sys.argv[1]).convert("RGBA")
+    img = img.resize((256, 256), Image.LANCZOS)
+    img.save(sys.argv[2], "PNG")
+    print("[icon] Installed 256x256 icon to hicolor theme.")
+except Exception as e:
+    print(f"[icon] scale failed: {e}", file=sys.stderr)
+    sys.exit(1)
+SCALE256_EOF
+      # If 32x32 hicolor slot still empty (ICO download failed), copy the 256 there too.
+      if [[ ! -f "${_hicolor_32}/${_icon_name}.png" ]]; then
+        cp "${_hicolor_256}/${_icon_name}.png" "${_hicolor_32}/${_icon_name}.png" 2>/dev/null || true
       fi
       ok_msg "High-quality Steam assets downloaded."
     else
       warn_msg "Grid poster unavailable — portrait poster slot will be empty."
+    fi
+
+    # Also copy the 32x32 icon to the legacy flat location ICON_PATH so the
+    # absolute-path fallback in the .desktop file still works on DEs that
+    # don't honour the hicolor theme lookup.
+    cp "${_hicolor_32}/${_icon_name}.png" "${ICON_PATH}" 2>/dev/null || true
+
+    # Refresh the icon theme cache so the new icons are found immediately.
+    if command_exists gtk-update-icon-cache; then
+      gtk-update-icon-cache -f -t "${ICON_DIR}/hicolor" 2>/dev/null || true
     fi
   fi
 
@@ -4273,11 +4297,11 @@ fi
 # has spawned internally (winedevice.exe, services.exe, etc.).
 _kill_session() {
   local pid="${1:-}"
-  [[ -z "${pid}" ]] && return
+  [[ -z "${pid}" ]] || [[ "${pid}" == "0" ]] && return
   # SIGTERM the entire session, wait up to 3 s, then SIGKILL survivors.
   pkill -TERM -s "${pid}" 2>/dev/null || true
   local _w=0
-  while pkill -0 -s "${pid}" 2>/dev/null && (( _w < 30 )); do
+  while kill -0 "${pid}" 2>/dev/null && (( _w < 30 )); do
     sleep 0.1; (( _w++ )) || true
   done
   pkill -KILL -s "${pid}" 2>/dev/null || true
@@ -4325,17 +4349,22 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
     # DBUS_SESSION_BUS_ADDRESS=/dev/null prevents gamescope from connecting to
     # an existing D-Bus session and interfering with the desktop environment.
     # shellcheck disable=SC2086
-    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
+    # --fork ensures setsid always creates a new session even if the shell is
+    # already a process group leader. The setsid process itself becomes the
+    # session leader (SID == its PID == _GS_PID), so pkill -s _GS_PID in
+    # _kill_session() reaches gamescope, gamescope-reaper, wine, and all
+    # Wine children (winedevice.exe, services.exe) regardless of child groups.
+    # shellcheck disable=SC2086
+    setsid --fork env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
       "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
         "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
         "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    # Run wine in its own session (setsid) so _cleanup can kill wine and all
-    # its children (winedevice.exe, services.exe, the game) with kill -- -PID
-    # without touching any other processes in our shell session.
-    setsid "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
+    # Run wine in its own session so _cleanup can kill wine and all its
+    # children (winedevice.exe, services.exe, the game) via pkill -s PID.
+    setsid --fork "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
       "${_game_args[@]}" &
     _WINE_PID=$!
@@ -4345,11 +4374,11 @@ else
   # No bootstrap data available — launch the game directly without shared memory.
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
     # shellcheck disable=SC2086
-    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
+    setsid --fork env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _GS_PID=$!
     wait "${_GS_PID}"
   else
-    setsid "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
+    setsid --fork "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _WINE_PID=$!
     wait "${_WINE_PID}"
   fi
@@ -4396,7 +4425,7 @@ Name=${APP_NAME}
 Comment=Play Cluckers Central (Realm Royale) on Linux
 Exec=${LAUNCHER_SCRIPT}
 Path=${HOME}/.local/bin
-Icon=${ICON_PATH}
+Icon=cluckers-central
 Terminal=false
 Type=Application
 Categories=Game;
