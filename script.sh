@@ -3794,53 +3794,107 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      # Extract the icon resource from the game EXE using unzip.
-      # List all entries, filter for ICON resources, try each path in turn.
-      local _ico_path="" _found_paths
-      _found_paths=$(unzip -l "${_game_exe}" 2>/dev/null \
-        | awk 'NF>=4{print $NF}' \
-        | grep -iE '(rsrc|ICON).*\.(ico|ICO)$|ICON/[0-9]') || true
-
-      if [[ -z "${_found_paths}" ]]; then
-        # unzip cannot read this EXE format — log what we see for debugging.
-        warn_msg "unzip found no ICON entries in the game EXE."
-        warn_msg "EXE path: ${_game_exe}"
-        unzip -l "${_game_exe}" 2>&1 | head -10 \
-          | while IFS= read -r _line; do warn_msg "  ${_line}"; done || true
-      else
-        while IFS= read -r _ico_path; do
-          [[ -z "${_ico_path}" ]] && continue
-          unzip -p "${_game_exe}" "${_ico_path}" > "${_exe_ico}" 2>/dev/null \
-            && [[ -s "${_exe_ico}" ]] && break
-          rm -f "${_exe_ico}"
-          _ico_path=""
-        done <<< "${_found_paths}"
-      fi
-
-      if [[ -s "${_exe_ico}" ]]; then
-        ok_msg "Game icon extracted from EXE (${_ico_path:-unknown})."
-        # Convert the ICO to PNG using Pillow.
-        python3 - "${_exe_ico}" "${ICON_PATH}" \
-                   "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png" << 'ICO2PNG_EOF'
-import sys, shutil
+      # Extract the icon from the game EXE using a Python PE resource parser.
+      # The EXE is a standard Windows PE binary — not a zip archive — so
+      # tools like unzip or 7z cannot read its resources. We parse the PE
+      # .rsrc section directly using Python's struct module (stdlib only),
+      # extract RT_GROUP_ICON (type 14) and RT_ICON (type 3) frames, assemble
+      # a valid ICO file in memory, and save the largest frame as PNG.
+      python3 - "${_game_exe}" "${ICON_PATH}" \
+                 "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png" << 'ICOEXT_EOF'
+import struct, sys, shutil, io
 from PIL import Image
-ico  = sys.argv[1]
-flat = sys.argv[2]
-hi   = sys.argv[3]
-img  = Image.open(ico).convert("RGBA")
-img.save(flat, "PNG")
-shutil.copy2(flat, hi)
-print(f"[icon] {img.width}x{img.height} PNG installed.")
-ICO2PNG_EOF
-        if [[ $? -eq 0 ]]; then
-          ok_msg "Game icon installed at ${ICON_PATH}."
-        else
-          warn_msg "ICO to PNG conversion failed — install Pillow: pip install pillow"
-        fi
-        rm -f "${_exe_ico}"
+
+def extract_pe_group_icon(path, group_id=1):
+    """Parse a Windows PE binary and extract icon group group_id as ICO bytes."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    if data[:2] != b'MZ':
+        raise ValueError("Not a PE file")
+    pe_off = struct.unpack_from('<I', data, 0x3C)[0]
+    if data[pe_off:pe_off+4] != b'PE\x00\x00':
+        raise ValueError("Bad PE signature")
+    num_sects = struct.unpack_from('<H', data, pe_off + 6)[0]
+    opt_sz    = struct.unpack_from('<H', data, pe_off + 20)[0]
+    magic     = struct.unpack_from('<H', data, pe_off + 24)[0]
+    dd_base   = pe_off + 24 + (112 if magic == 0x20B else 96)
+    rsrc_rva  = struct.unpack_from('<I', data, dd_base + 16)[0]
+    rsrc_vaddr = rsrc_foff = 0
+    sect_base = pe_off + 24 + opt_sz
+    for i in range(num_sects):
+        s   = sect_base + i * 40
+        va  = struct.unpack_from('<I', data, s + 12)[0]
+        rsz = struct.unpack_from('<I', data, s + 16)[0]
+        rof = struct.unpack_from('<I', data, s + 20)[0]
+        if va <= rsrc_rva < va + rsz:
+            rsrc_vaddr, rsrc_foff = va, rof
+            break
+    if rsrc_foff == 0:
+        raise ValueError("No .rsrc section")
+    def rva2off(rva): return rsrc_foff + (rva - rsrc_vaddr)
+    def read_dir(off):
+        named = struct.unpack_from('<H', data, off + 12)[0]
+        ident = struct.unpack_from('<H', data, off + 14)[0]
+        return [(struct.unpack_from('<I', data, off+16+i*8)[0] & 0x7FFFFFFF,
+                 struct.unpack_from('<I', data, off+16+i*8+4)[0] & 0x7FFFFFFF,
+                 bool(struct.unpack_from('<I', data, off+16+i*8+4)[0] & 0x80000000))
+                for i in range(named + ident)]
+    def get_res(type_id, res_id):
+        td = next((rsrc_foff+o for i,o,s in read_dir(rsrc_foff) if i==type_id and s), None)
+        if td is None: return None
+        id_dir = next((rsrc_foff+o for i,o,s in read_dir(td) if i==res_id and s), None)
+        if id_dir is None: return None
+        langs = read_dir(id_dir)
+        if not langs: return None
+        _, doff, is_sub = langs[0]
+        if is_sub: return None
+        eoff = rsrc_foff + doff
+        rva  = struct.unpack_from('<I', data, eoff)[0]
+        size = struct.unpack_from('<I', data, eoff+4)[0]
+        return data[rva2off(rva):rva2off(rva)+size]
+    grp = get_res(14, group_id)
+    if not grp: raise ValueError(f"RT_GROUP_ICON {group_id} not found")
+    count = struct.unpack_from('<H', grp, 4)[0]
+    frames = []
+    for i in range(count):
+        e = 6 + i*14
+        w,h,col = struct.unpack_from('<BBB', grp, e)
+        planes,bpp = struct.unpack_from('<HH', grp, e+4)
+        icon_id = struct.unpack_from('<H', grp, e+12)[0]
+        dib = get_res(3, icon_id)
+        if dib: frames.append((w,h,col,planes,bpp,dib))
+    if not frames: raise ValueError("No icon frames extracted")
+    n = len(frames); data_off = 6 + 16*n
+    hdr = struct.pack('<HHH', 0, 1, n)
+    dirs = b''; imgs = b''
+    for w,h,col,planes,bpp,dib in frames:
+        dirs += struct.pack('<BBBBHHII', w,h,col,0,planes,bpp,len(dib),data_off+len(imgs))
+        imgs += dib
+    return hdr + dirs + imgs
+
+try:
+    exe   = sys.argv[1]
+    flat  = sys.argv[2]
+    hi    = sys.argv[3]
+    ico   = extract_pe_group_icon(exe, 1)
+    img   = Image.open(io.BytesIO(ico))
+    sizes = sorted(img.ico.sizes(), key=lambda s: s[0]*s[1], reverse=True) \
+            if hasattr(img, 'ico') and img.ico.sizes() else [img.size]
+    frame = img.ico.getimage(sizes[0]).convert('RGBA') \
+            if hasattr(img, 'ico') else img.convert('RGBA')
+    frame.save(flat, 'PNG')
+    shutil.copy2(flat, hi)
+    print(f"[icon] {frame.width}x{frame.height} PNG from PE .rsrc installed.")
+    sys.exit(0)
+except Exception as e:
+    print(f"[icon] PE icon extraction failed: {e}", file=sys.stderr)
+    sys.exit(1)
+ICOEXT_EOF
+      if [[ $? -eq 0 ]]; then
+        ok_msg "Game icon installed at ${ICON_PATH}."
       else
-        rm -f "${_exe_ico}"
         warn_msg "Could not extract icon from game EXE — desktop icon will be missing."
+        warn_msg "Ensure python3 and Pillow (pip install pillow) are available."
       fi
     fi
 
