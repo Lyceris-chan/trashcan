@@ -3794,32 +3794,27 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      # Extract the icon from the game EXE using 7z (more reliable than unzip
-      # for PE executables with appended zip data). 7z lists all entries and
-      # we pick the first .rsrc/ICON entry found.
-      local _ico_path=""
-      if command_exists 7z; then
-        _ico_path=$(7z l "${_game_exe}" 2>/dev/null \
-          | awk '{print $NF}' \
-          | grep -iE '\.rsrc.ICON.[^/\\]+$' \
-          | head -1)
-        if [[ -n "${_ico_path}" ]]; then
-          7z e -so "${_game_exe}" "${_ico_path}" > "${_exe_ico}" 2>/dev/null || true
-          [[ -s "${_exe_ico}" ]] || rm -f "${_exe_ico}"
-        fi
-      fi
+      # Extract the icon resource from the game EXE using unzip.
+      # List all entries, filter for ICON resources, try each path in turn.
+      local _ico_path="" _found_paths
+      _found_paths=$(unzip -l "${_game_exe}" 2>/dev/null \
+        | awk 'NF>=4{print $NF}' \
+        | grep -iE '(rsrc|ICON).*\.(ico|ICO)$|ICON/[0-9]') || true
 
-      # Fall back to unzip if 7z failed or is unavailable.
-      if [[ ! -s "${_exe_ico}" ]] && command_exists unzip; then
+      if [[ -z "${_found_paths}" ]]; then
+        # unzip cannot read this EXE format — log what we see for debugging.
+        warn_msg "unzip found no ICON entries in the game EXE."
+        warn_msg "EXE path: ${_game_exe}"
+        unzip -l "${_game_exe}" 2>&1 | head -10 \
+          | while IFS= read -r _line; do warn_msg "  ${_line}"; done || true
+      else
         while IFS= read -r _ico_path; do
           [[ -z "${_ico_path}" ]] && continue
           unzip -p "${_game_exe}" "${_ico_path}" > "${_exe_ico}" 2>/dev/null \
             && [[ -s "${_exe_ico}" ]] && break
           rm -f "${_exe_ico}"
           _ico_path=""
-        done < <(unzip -l "${_game_exe}" 2>/dev/null \
-                 | awk '{print $NF}' \
-                 | grep -iE '\.rsrc.ICON.[^/\\]+$')
+        done <<< "${_found_paths}"
       fi
 
       if [[ -s "${_exe_ico}" ]]; then
@@ -4343,11 +4338,15 @@ _launch_gamescope() {
   local _sentinel
   _sentinel=$(mktemp)
 
-  # Wrap the launch command with a sentinel: remove the sentinel file when
-  # wine/shm_launcher exits so the watcher below detects game exit reliably.
+  # Wrap the launch command: when wine/shm_launcher exits, remove the
+  # sentinel file so the poll loop below detects game exit.
+  # bash -c 'script' argv0 arg1 arg2...: $0=argv0, $1..=args, "$@" expands
+  # all positional args except $0. We pass the sentinel as the last arg and
+  # strip it before passing the rest to the game command.
   # shellcheck disable=SC2086
   setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
-    bash -c '"$@"; rm -f "$1"' -- "${_sentinel}" "${_gs_cmd[@]}" &
+    bash -c 'sentinel=$1; shift; "$@"; rm -f "${sentinel}"' \
+      -- "${_sentinel}" "${_gs_cmd[@]}" &
   _GS_PID=$!
   _WINE_PID=${_GS_PID}
 
