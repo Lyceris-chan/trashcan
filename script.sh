@@ -4100,7 +4100,7 @@ export WINEDEBUG="-all"
 #               is NOT used, as Gamescope requires the X11 driver to function.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
-  _overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b;xinput1_3=n"
+  _overrides="dxgi=n;xinput1_3=n"
   if [[ "${use_gamescope}" == "false" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
@@ -4145,7 +4145,7 @@ done
 [[ -n "${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="${_sdl_db}"
 SDLEOF
 else
-  _overrides="dxgi=n,b;d3d11=n,b;d3d10core=n,b"
+  _overrides="dxgi=n"
   if [[ "${use_gamescope}" == "false" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
@@ -4465,12 +4465,21 @@ trap _cleanup EXIT INT TERM HUP
 # ---- Launch ---------------------------------------------------------------
 
 # Prepare final command.
-# Always launch the game using the Wine binary directly — never via 'proton run'.
-# The 'proton run' path invokes the Steam Linux Runtime (pressure-vessel) container
-# which requires Steam to be running. We replicate what pressure-vessel provides 
-# by setting LD_LIBRARY_PATH to the Proton build's own lib directories, exactly 
-# as we do for maintenance tasks.
-_launch_cmd=("${WINE}")
+# If a Proton script is available, we use 'proton run' to launch the game.
+# This ensures the game runs within the Steam Linux Runtime (pressure-vessel)
+# container, which provides modern networking and crypto libraries (like GnuTLS)
+# required by the Unreal Engine 3 ServerTravel match transition. Without it,
+# the game may hang on the loading screen when entering a match.
+if [[ -n "${PROTON_SCRIPT}" ]]; then
+  # Required by proton run
+  export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
+  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${HOME}/.steam/root"
+  export SteamGameId="0"
+  export SteamAppId="0"
+  _launch_cmd=("python3" "${PROTON_SCRIPT}" "run")
+else
+  _launch_cmd=("${WINE}")
+fi
 
 _launch_gamescope() {
   # Launch gamescope wrapping the game.
