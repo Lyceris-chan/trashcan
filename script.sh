@@ -217,10 +217,10 @@ readonly STEAM_ASSET_BASE="https://shared.fastly.steamstatic.com/store_item_asse
 #   hero_capsule.jpg         — secondary hero capsule art (JPG,  ~86 KB)
 #
 # The icon: Steam's community .ico is only a 32×32 BMP (4 KB). We instead
-# use the portrait poster (library_600x900_2x.jpg, already downloaded as grid.jpg)
-# as the desktop and Steam shortcut icon. logo_2x.png is a wide transparent
-# overlay — it looks squished in square icon slots. The portrait poster has
-# the game's key art and renders correctly at any icon size.
+# use header.jpg (460×215, Steam's store header/capsule image) as the desktop
+# and Steam shortcut icon. It is the best available option: recognisable at
+# small sizes and a reasonable aspect ratio. See icon download section below
+# for a full comparison of alternatives.
 readonly STEAM_LOGO_URL="${STEAM_ASSET_BASE}/logo_2x.png?t=1739811771"
 readonly STEAM_GRID_URL="${STEAM_ASSET_BASE}/library_600x900_2x.jpg?t=1739811771"
 readonly STEAM_HERO_URL="${STEAM_ASSET_BASE}/library_hero_2x.jpg?t=1739811771"
@@ -3746,22 +3746,22 @@ XDLL_B64_EOF
     # Download the game icon (.ico) from Steam CDN and keep it as a reference.
     # Steam's community icon for Realm Royale is a tiny 32x32 BMP-encoded .ico
     # with no embedded PNG frames, so it is not suitable for modern displays.
-    # Instead we use the high-resolution logo_2x.png (already downloaded above
-    # as STEAM_LOGO_PATH) as the desktop icon and Steam shortcut icon — it is a
-    # full-resolution transparent PNG that renders crisply at any size.
     curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}" || true
 
-    # Use the portrait poster (600×900) as the desktop and Steam shortcut icon.
-    # logo_2x.png is a wide transparent overlay designed to sit on top of the
-    # library art — it is NOT a square icon and looks squished in icon slots.
-    # The portrait poster has the game's key art and displays correctly at any
-    # icon size. It is the best available standalone image for this purpose.
-    if [[ -f "${STEAM_GRID_PATH}" ]]; then
-      cp "${STEAM_GRID_PATH}" "${STEAM_ICON_PNG_PATH}"
+    # Use header.jpg (460×215) as the desktop shortcut and Steam icon.
+    # From img-sauce this is Steam's own store header image — it is the closest
+    # match to a proper application icon: recognisable at small sizes and not
+    # squished. Alternatives considered:
+    #   logo_2x.png      — wide transparent overlay, letterboxes badly in icons
+    #   library_600x900  — portrait poster, too tall for icon slots
+    #   capsule_231x87   — very small (87px tall), blurry when scaled up
+    #   header.jpg       — 460×215, best aspect ratio available ✓
+    if [[ -f "${STEAM_HEADER_PATH}" ]]; then
+      cp "${STEAM_HEADER_PATH}" "${STEAM_ICON_PNG_PATH}"
       cp "${STEAM_ICON_PNG_PATH}" "${ICON_PATH}"
       ok_msg "High-quality Steam assets downloaded."
     else
-      warn_msg "Portrait poster unavailable — desktop shortcut will use a fallback icon."
+      warn_msg "Header image unavailable — desktop shortcut will use a fallback icon."
     fi
   fi
 
@@ -4469,8 +4469,8 @@ try:
     # Source: Valve's internal format, reproduced by steam-rom-manager.
     quoted_exe = f'"{LAUNCHER}"'
     start_dir  = f'"{os.path.dirname(LAUNCHER)}"'
-    # Use the portrait poster (600×900) as the icon — it renders correctly in
-    # square icon slots. The wide logo overlay would appear squished.
+    # Use header.jpg (460×215) as the icon — the store header/capsule image
+    # is the best available option at a reasonable aspect ratio for icon slots.
     icon_path = (
         STEAM_ICON_PNG
         if STEAM_ICON_PNG and os.path.exists(STEAM_ICON_PNG)
