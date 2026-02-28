@@ -4310,29 +4310,41 @@ trap _cleanup EXIT INT TERM HUP
 # to the Proton build's own lib directories, exactly as we do for maintenance tasks.
 _launch_cmd=("${WINE}")
 
+_launch_gamescope() {
+  # Launch gamescope wrapping the game. gamescope does not always exit when
+  # the game exits — it may linger as a Wayland compositor. We therefore:
+  #   1. Start gamescope (and game) in the background, recording its PID.
+  #   2. Poll in a background subshell for shm_launcher / wine to exit.
+  #   3. When the game process is gone, kill the gamescope session.
+  #   4. wait on gamescope so the EXIT trap (_cleanup) fires cleanly.
+  local _gs_cmd=("$@")
+  # shellcheck disable=SC2086
+  setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
+    "${_gs_cmd[@]}" &
+  _GS_PID=$!
+  _WINE_PID=${_GS_PID}
+
+  # Background watcher: once shm_launcher.exe / wine is no longer a
+  # descendant of gamescope, kill the entire gamescope session.
+  ( while kill -0 "${_GS_PID}" 2>/dev/null; do
+      # Check if any wine/shm_launcher child still exists under gamescope.
+      if ! pgrep -P "${_GS_PID}" > /dev/null 2>&1 \
+         && ! pgrep -s "${_GS_PID}" > /dev/null 2>&1; then
+        kill -TERM -- "-${_GS_PID}" 2>/dev/null || true
+        break
+      fi
+      sleep 0.5
+    done
+  ) &
+
+  wait "${_GS_PID}" || true
+}
+
 if [[ -s "${_bootstrap_tmp}" ]]; then
-  # Launch via shm_launcher.exe: writes bootstrap blob to shared memory,
-  # then starts the game executable. The wait below blocks until the game
-  # (and gamescope, if used) exits; the EXIT trap then runs _cleanup().
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
-    # setsid makes gamescope the session leader (SID == _GS_PID). The
-    # _kill_session() helper in _cleanup() sends SIGTERM to every process
-    # in that session — gamescope, its reaper child, Wine, and all Wine
-    # children (winedevice.exe, etc.) — then SIGKILL any survivors.
-    # DBUS_SESSION_BUS_ADDRESS=/dev/null prevents gamescope from connecting
-    # to an existing D-Bus session and interfering with the desktop.
-    # shellcheck disable=SC2086
-    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
-      "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
-        "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
-        "${_game_args[@]}" &
-    _GS_PID=$!
-    _WINE_PID=${_GS_PID}
-    wait "${_GS_PID}" || true
-    # Gamescope does not exit when the game exits — it stays alive waiting
-    # for another Wayland client. Explicitly kill it and its whole process
-    # group (gamescopereaper, gamescope-wl) after wait returns.
-    _kill_session "${_GS_PID}"
+    _launch_gamescope "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
+      "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
+      "${_game_args[@]}"
   else
     setsid "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
       "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
@@ -4342,13 +4354,7 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   fi
 else
   if [[ "${USE_GAMESCOPE}" == "true" ]]; then
-    # shellcheck disable=SC2086
-    setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
-      "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
-    _GS_PID=$!
-    _WINE_PID=${_GS_PID}
-    wait "${_GS_PID}" || true
-    _kill_session "${_GS_PID}"
+    _launch_gamescope "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}"
   else
     setsid "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
     _WINE_PID=$!
