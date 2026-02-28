@@ -575,14 +575,6 @@ install_sys_deps() {
     fi
   fi
 
-  # Ensure python3-pillow is installed for icon extraction.
-  local pillow_pkg="python3-pillow"
-  [[ "${pkg_mgr}" == "pacman" ]] && pillow_pkg="python-pillow"
-  [[ "${pkg_mgr}" == "zypper" ]] && pillow_pkg="python3-Pillow"
-  if ! is_pkg_installed "${pkg_mgr}" "${pillow_pkg}"; then
-    to_install+=("${pillow_pkg}")
-  fi
-
   # Some distros provide wine/winetricks commands via package names that differ
   # from binary names. Ensure apt users still receive the full runtime stack.
   if [[ "${pkg_mgr}" == "apt" ]]; then
@@ -654,9 +646,10 @@ install_sys_deps() {
   ensure_python_deps
 }
 
-# Ensures essential Python modules are installed via pip if missing.
-# Some distributions do not package these or have very old versions.
-# We use 'python3 -m pip install' to ensure they are available to our script.
+# Ensures essential Python modules are installed via pip.
+# Pillow is required for icon extraction, blake3 for update verification,
+# and vdf for Steam integration. We use 'python3 -m pip install --user'
+# to keep these isolated from the system Python environment.
 ensure_python_deps() {
   step_msg "Step 1c — Ensuring Python dependencies (Pillow, blake3, vdf)..."
   
@@ -1216,14 +1209,19 @@ run_uninstall() {
     "${ICON_POSTER_PATH}"
     "${TOOLS_DIR}/shm_launcher.exe"
     "${TOOLS_DIR}/xinput1_3.dll"
+    "${ICON_DIR}/hicolor/32x32/apps/cluckers-central.png"
+    "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png"
   )
   local -a labels=(
     "Launcher script"
     "Desktop shortcut"
+    "Icon (PNG)"
     "Icon (ICO)"
     "Icon (portrait poster)"
     "shm_launcher.exe"
     "xinput1_3.dll"
+    "Hicolor theme icon (32x32)"
+    "Hicolor theme icon (256x256)"
   )
 
   local i
@@ -1233,6 +1231,17 @@ run_uninstall() {
       ok_msg "${labels[i]} removed."
     fi
   done
+
+  # Step 1b — Uninstall Python modules (Pillow, blake3, vdf) via pip.
+  if command_exists python3 && python3 -m pip --version >/dev/null 2>&1; then
+    info_msg "Uninstalling Python dependencies via pip..."
+    # --break-system-packages is needed on some modern distros (PEP 668) 
+    # to allow pip to uninstall packages it installed in ~/.local.
+    python3 -m pip uninstall -y Pillow blake3 vdf >/dev/null 2>&1 || \
+    python3 -m pip uninstall -y --break-system-packages Pillow blake3 vdf >/dev/null 2>&1 || \
+      warn_msg "Could not uninstall Python modules via pip (already removed?)."
+    ok_msg "Python dependencies removed."
+  fi
 
   info_msg "Looking for Steam installation to clean up shortcuts..."
   local steam_root=""
