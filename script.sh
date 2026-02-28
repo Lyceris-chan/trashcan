@@ -179,7 +179,7 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.jpg"
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster, high-res desktop icon
 
 readonly APP_NAME="Cluckers Central"
 
@@ -1234,8 +1234,9 @@ unsigned_id    = compute_shortcut_id(LAUNCHER, APP_NAME)
 shortcut_appid = (
     unsigned_id - 4294967296 if unsigned_id > 2147483647 else unsigned_id
 )
-# The grid/ filename prefix is the 32-bit unsigned CRC — same as installer.
-grid_appid     = str(unsigned_id)
+# Both ID formats written by the installer need to be cleaned up.
+long_id    = (unsigned_id << 32) | 0x02000000
+grid_appids = [str(unsigned_id), str(long_id)]
 
 # -- shortcuts.vdf ----------------------------------------------------------
 shortcuts_path = os.path.join(USER_CONFIG_DIR, "shortcuts.vdf")
@@ -1328,11 +1329,12 @@ art_names = [
     "_logo.png", "_logo.jpg",  # Clear logo
     "_header.jpg", "_header.png",  # Small header
 ]
-for name in art_names:
-    art = os.path.join(grid_dir, f"{grid_appid}{name}")
-    if os.path.exists(art):
-        os.remove(art)
-        removed += 1
+for grid_id in grid_appids:
+    for name in art_names:
+        art = os.path.join(grid_dir, f"{grid_id}{name}")
+        if os.path.exists(art):
+            os.remove(art)
+            removed += 1
 if removed:
     print(f"{_OK} Removed custom Steam artwork ({removed} file(s)).")
 PYEOF
@@ -3748,14 +3750,19 @@ XDLL_B64_EOF
     curl ${CURL_FLAGS}f -o "${STEAM_WIDE_PATH}"   "${STEAM_WIDE_URL}"   || true
     curl ${CURL_FLAGS}f -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" || true
 
-    # Download the community_icon — the designated game icon from img-sauce.
-    # This is the image Steam itself labels as "community_icon" in its asset
-    # metadata. It is used for the desktop shortcut and the Steam icon field.
-    if curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}"; then
-      cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
+    # Download the community_icon — the image Steam labels as the game icon.
+    # We keep it for the Steam shortcut icon field (shortcuts.vdf "icon" key).
+    curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}" || true
+
+    # Use the portrait poster (library_600x900_2x.jpg, already downloaded as
+    # STEAM_GRID_PATH) as the desktop .desktop icon. It is 198 KB of high-res
+    # key art that scales well at any size. The community_icon jpg is only
+    # 816 bytes — too small for crisp desktop display.
+    if [[ -f "${STEAM_GRID_PATH}" ]]; then
+      cp "${STEAM_GRID_PATH}" "${ICON_PATH}"
       ok_msg "High-quality Steam assets downloaded."
     else
-      warn_msg "Community icon unavailable — desktop shortcut will use a fallback icon."
+      warn_msg "Grid poster unavailable — desktop shortcut will use a fallback icon."
     fi
   fi
 
@@ -4452,12 +4459,10 @@ try:
     # Source: Valve's internal format, reproduced by steam-rom-manager.
     quoted_exe = f'"{LAUNCHER}"'
     start_dir  = f'"{os.path.dirname(LAUNCHER)}"'
-    # Use the community_icon (designated by img-sauce as the game icon).
-    icon_path = (
-        STEAM_ICON
-        if STEAM_ICON and os.path.exists(STEAM_ICON)
-        else ICON_PATH
-    )
+    # Use the community_icon jpg as the Steam shortcut icon field.
+    # This is what Steam labels as "community_icon" in its asset metadata.
+    # The desktop .desktop icon (ICON_PATH) uses the larger portrait poster.
+    icon_path = STEAM_ICON if STEAM_ICON and os.path.exists(STEAM_ICON) else ICON_PATH
     # LaunchOptions: leave empty — the launcher script handles gamescope
     # and all launch arguments internally. Putting gamescope here would cause
     # it to run twice when launched from Steam (once from Steam's LaunchOptions
@@ -4516,8 +4521,7 @@ try:
     grid_dir = os.path.join(USER_CONFIG_DIR, "..", "grid")
     os.makedirs(grid_dir, exist_ok=True)
 
-    # Artwork suffix mapping — exactly the 3 slots used by the old working version,
-    # verified from img-sauce labels and confirmed to display in Steam's library.
+    # Artwork suffix mapping — verified from img-sauce labels.
     # img-sauce label  → Steam grid/ suffix → source file
     # library_capsule  → p                  → library_600x900_2x.jpg
     # library_hero     → _hero              → library_hero_2x.jpg
@@ -4528,20 +4532,23 @@ try:
         STEAM_LOGO:   "_logo",  # logo             (transparent overlay)
     }
 
-    # Steam uses the 32-bit unsigned CRC as the prefix for grid/ filenames.
-    # Verified against: steam-rom-manager, Lutris, Heroic Games Launcher.
-    # Example filename: 2990937161p.jpg  (unsigned_id + suffix + ext)
-    # Do NOT use the 64-bit (unsigned_id << 32 | 0x02000000) here — that is
-    # the internal AppID used in shortcuts.vdf, not the grid/ filename prefix.
+    # Steam uses the 32-bit unsigned CRC as the grid/ filename prefix.
+    # Older Steam versions use unsigned_id directly.
+    # Newer Steam versions (post-2019) also look for the long_id format.
+    # We write both so artwork appears regardless of Steam client version.
+    long_id = (unsigned_id << 32) | 0x02000000
+    grid_ids = [str(unsigned_id), str(long_id)]
+
     for src, suffix in art_map.items():
         if not os.path.exists(src):
             continue
         ext = os.path.splitext(src)[1]
-        dest = os.path.join(grid_dir, f"{unsigned_id}{suffix}{ext}")
-        try:
-            shutil.copy2(src, dest)
-        except Exception:
-            pass
+        for grid_id in grid_ids:
+            dest = os.path.join(grid_dir, f"{grid_id}{suffix}{ext}")
+            try:
+                shutil.copy2(src, dest)
+            except Exception:
+                pass
 
     # -- localconfig.vdf: set logo position ---------------------------------
     localconfig_path = os.path.join(USER_CONFIG_DIR, "localconfig.vdf")
