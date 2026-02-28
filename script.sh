@@ -3952,10 +3952,17 @@ try:
     hi    = sys.argv[3]
     ico   = extract_pe_group_icon(exe, 1)
     img   = Image.open(io.BytesIO(ico))
-    sizes = sorted(img.ico.sizes(), key=lambda s: s[0]*s[1], reverse=True) \
-            if hasattr(img, 'ico') and img.ico.sizes() else [img.size]
-    frame = img.ico.getimage(sizes[0]).convert('RGBA') \
-            if hasattr(img, 'ico') else img.convert('RGBA')
+    # img.ico.sizes() might not exist in all PIL versions, fallback to img.size
+    if hasattr(img, 'ico') and hasattr(img.ico, 'sizes') and img.ico.sizes():
+        sizes = sorted(img.ico.sizes(), key=lambda s: s[0]*s[1], reverse=True)
+    else:
+        sizes = [img.size]
+    
+    if hasattr(img, 'ico') and hasattr(img.ico, 'getimage'):
+        frame = img.ico.getimage(sizes[0]).convert('RGBA')
+    else:
+        frame = img.convert('RGBA')
+        
     frame.save(flat, 'PNG')
     shutil.copy2(flat, hi)
     print(f"[icon] {frame.width}x{frame.height} PNG from PE .rsrc installed.")
