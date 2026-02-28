@@ -3805,14 +3805,21 @@ ico  = sys.argv[1]
 flat = sys.argv[2]
 hi   = sys.argv[3]
 img  = Image.open(ico)
-# Pick the largest available frame from the multi-frame ICO.
-if hasattr(img, 'ico') and img.ico.sizes():
-    largest = max(img.ico.sizes(), key=lambda s: s[0] * s[1])
-    img = img.ico.getimage(largest)
-img = img.convert("RGBA")
-img.save(flat, "PNG")
+# Iterate all frames to find the largest by pixel area.
+# img.seek(i) navigates to frame i; img.size gives its dimensions.
+# This is more reliable than img.ico.getimage() which re-opens the file.
+best = img
+best_area = img.size[0] * img.size[1]
+for i in range(1, getattr(img, 'n_frames', 1)):
+    img.seek(i)
+    area = img.size[0] * img.size[1]
+    if area > best_area:
+        best_area = area
+        best = img.copy()
+best = best.convert("RGBA")
+best.save(flat, "PNG")
 shutil.copy2(flat, hi)
-print(f"[icon] {img.width}x{img.height} PNG installed.")
+print(f"[icon] {best.width}x{best.height} PNG installed.")
 ICO2PNG_EOF
         if [[ $? -eq 0 ]]; then
           ok_msg "Game icon installed at ${ICON_PATH}."
@@ -4286,21 +4293,30 @@ _cleanup() {
   # which matches against the full command line in /proc/PID/cmdline.
   pkill -KILL -x "gamescope-wl"    2>/dev/null || true
   pkill -KILL -f "gamescopereaper" 2>/dev/null || true
-  # Kill winedevice.exe processes that have our WINEPREFIX in their cmdline.
-  # pkill -f treats the pattern as a regex — dots in the path are wildcards.
-  # Use grep with fixed-string matching against /proc/*/cmdline instead to
-  # avoid false positives from path components with special characters.
-  local _wineprefix_escaped
-  _wineprefix_escaped=$(printf '%s' "${WINEPREFIX}" | sed 's/[.[\*^$(){}|+?]/\\&/g')
-  pkill -KILL -f "winedevice\.exe.*${_wineprefix_escaped}" 2>/dev/null || true
 
-  # Shut down the wineserver for our prefix only. This flushes pending
-  # registry writes and reaps any remaining Wine helper processes.
-  # Scoped by WINEPREFIX so other Wine prefixes and games are not affected.
-  # Use -k (kill) not -w (wait) so we don't block the launcher on shutdown.
+  # Kill winedevice.exe and wineserver processes associated with our prefix.
+  # pkill -f uses regex and dots in WINEPREFIX match any character. Instead,
+  # scan /proc directly using fixed-string grep to avoid false positives.
+  # wineserver is a daemon not a child of gamescope, so session/group kills
+  # above do not reach it — we must kill it explicitly here.
+  local _pid_path _pid _cmdline
+  for _pid_path in /proc/[0-9]*/cmdline; do
+    _cmdline=$(tr '\0' ' ' < "${_pid_path}" 2>/dev/null) || continue
+    case "${_cmdline}" in
+      *winedevice.exe*|*wineserver*|*services.exe*|*plugplay.exe*|*svchost.exe*)
+        if printf '%s' "${_cmdline}" | grep -qF "${WINEPREFIX}"; then
+          # Extract the numeric PID from /proc/PID/cmdline.
+          _pid="${_pid_path%/cmdline}"
+          _pid="${_pid##/proc/}"
+          kill -KILL "${_pid}" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done
+
+  # Shut down the wineserver for our prefix gracefully first, then force-kill.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
-  # Give wineserver a moment to process the kill before we exit.
-  sleep 0.5
+  sleep 0.3
 
   # Remove temp files created during this launcher session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
