@@ -2980,18 +2980,24 @@ EOF
   # Install xinput1_3.dll into the Wine prefix system32 so Wine loads our
   # custom XInput remapper instead of the built-in stub when the game requests
   # XInput. This must happen AFTER wineboot has fully initialised the prefix.
-  # Proton creates drive_c/windows/system32 as a symlink during prefix init;
-  # copying into it before wineboot runs follows a dangling symlink and fails
-  # with: cp: not writing through dangling symlink '…/system32/xinput1_3.dll'
+  #
+  # In a Proton prefix, drive_c/windows/system32 is a symlink to the real
+  # Windows DLL directory inside the prefix. Copying into a symlink with plain
+  # `cp` follows it and may fail with "not writing through dangling symlink" if
+  # the link target does not yet exist. We resolve the real path with
+  # `readlink -f` and copy directly into the resolved directory to avoid this.
+  #
   # Wine resolves DLLs from the prefix system32 before its own built-in stubs,
   # so placing the remapper here ensures it intercepts all XInput calls.
   # Source: https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/xinput1_3/xinput_main.c
   if [[ "${controller_mode}" == "true" ]]; then
     local _xdll_src="${TOOLS_DIR}/xinput1_3.dll"
-    local _wine_sys32="${WINEPREFIX}/drive_c/windows/system32"
+    local _wine_sys32_link="${WINEPREFIX}/drive_c/windows/system32"
+    local _wine_sys32
+    _wine_sys32=$(readlink -f "${_wine_sys32_link}" 2>/dev/null || echo "${_wine_sys32_link}")
     if [[ -f "${_xdll_src}" ]] && [[ -d "${_wine_sys32}" ]]; then
-      cp --remove-destination "${_xdll_src}" "${_wine_sys32}/xinput1_3.dll" \
-        && ok_msg "xinput1_3.dll placed in Wine system32." \
+      cp -f "${_xdll_src}" "${_wine_sys32}/xinput1_3.dll" \
+        && ok_msg "xinput1_3.dll placed in Wine system32 (${_wine_sys32})." \
         || warn_msg "Could not copy xinput1_3.dll into Wine system32 — controller remapping may not work."
     elif [[ -f "${_xdll_src}" ]]; then
       warn_msg "Wine system32 not yet initialised — xinput1_3.dll will be copied on next run."
@@ -3702,6 +3708,8 @@ XDLL_B64_EOF
   step_msg "Step 7 — Downloading game assets..."
 
   mkdir -p "${ICON_DIR}"
+  mkdir -p "${ICON_DIR}/hicolor/32x32/apps"
+  mkdir -p "${ICON_DIR}/hicolor/256x256/apps"
   mkdir -p "${STEAM_ASSETS_DIR}"
 
   if command_exists curl; then
@@ -3807,9 +3815,21 @@ ICO2PNG_EOF
       warn_msg "Grid poster unavailable — portrait poster slot will be empty."
     fi
 
-    # Refresh the icon theme cache so the new icons appear immediately.
+    # Refresh the icon theme cache so the new icon appears immediately in
+    # application menus. Different desktop environments use different tools:
+    #   gtk-update-icon-cache — GNOME, XFCE, and most GTK-based desktops.
+    #   xdg-icon-resource     — portable XDG method, works across DEs.
+    #   kbuildsycoca5/6       — KDE Plasma 5/6 service cache (optional).
     if command_exists gtk-update-icon-cache; then
       gtk-update-icon-cache -f -t "${ICON_DIR}/hicolor" 2>/dev/null || true
+    fi
+    if command_exists xdg-icon-resource; then
+      xdg-icon-resource forceupdate --theme hicolor 2>/dev/null || true
+    fi
+    if command_exists kbuildsycoca6; then
+      kbuildsycoca6 2>/dev/null || true
+    elif command_exists kbuildsycoca5; then
+      kbuildsycoca5 2>/dev/null || true
     fi
   fi
 
@@ -4211,50 +4231,57 @@ _kill_session() {
   local pid="${1:-}"
   [[ -z "${pid}" || "${pid}" == "0" ]] && return
 
-  # Kill by session ID first — reaches every process whose SID == pid,
-  # regardless of how many process groups Wine has spawned internally.
+  # Kill the entire process group (negative PID = group leader).
+  # setsid makes the launched process both session leader and process group
+  # leader (PGID == PID), so kill -- -PID reaches all processes in the group.
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+
+  # Also kill by session ID — catches processes that called setsid themselves
+  # (gamescope-wl and gamescopereaper do this internally).
   pkill -TERM -s "${pid}" 2>/dev/null || true
 
-  # Also kill by parent PID to catch any child that joined a new session
-  # (gamescope-wl and gamescopereaper sometimes do this).
+  # Kill by parent PID as an additional sweep for any orphaned children.
   pkill -TERM -P "${pid}" 2>/dev/null || true
 
-  # Wait up to 3 seconds for the session leader to exit, then SIGKILL survivors.
+  # Wait up to 3 seconds for the process group leader to exit cleanly.
   local _w=0
   while kill -0 "${pid}" 2>/dev/null && (( _w < 30 )); do
     sleep 0.1; (( _w++ )) || true
   done
+
+  # Force-kill any survivors.
+  kill -KILL -- "-${pid}" 2>/dev/null || true
   pkill -KILL -s "${pid}" 2>/dev/null || true
   pkill -KILL -P "${pid}" 2>/dev/null || true
 }
 
 _cleanup() {
-  # Remove the trap to prevent recursion.
+  # Remove the trap to prevent recursion if _cleanup is called more than once.
   trap '' EXIT INT TERM HUP
 
-  # Kill the gamescope session (gamescope → gamescopereaper → gamescope-wl
-  # → wine → game). We kill by both session and parent PID because
-  # gamescope spawns gamescopereaper and gamescope-wl as children that
-  # may be in a different session from the original setsid call.
+  # Kill the gamescope process group and session.
+  # gamescope spawns gamescopereaper and gamescope-wl as children; they may
+  # create their own sessions, so we kill by group, session, and parent PID.
   _kill_session "${_GS_PID:-}"
 
-  # Kill the wine session for the non-gamescope path (wine → game → winedevice).
+  # Kill the Wine process group for the non-gamescope path
+  # (wine → game → winedevice.exe → services.exe).
   _kill_session "${_WINE_PID:-}"
 
-  # Belt-and-suspenders: kill any gamescope or Wine helper processes that
-  # are still associated with our prefix and weren't caught by session kill.
-  # We match by name only — these are safe to kill after the game has exited.
-  pkill -KILL -f "gamescope-wl"    2>/dev/null || true
-  pkill -KILL -f "gamescopereaper" 2>/dev/null || true
-  # Kill winedevice.exe scoped to our WINEPREFIX so other Wine games are safe.
+  # Belt-and-suspenders sweep: directly kill any gamescope helper processes
+  # and winedevice.exe that survived the session kill above.
+  # winedevice.exe is scoped to our WINEPREFIX path so other Wine games running
+  # concurrently are not affected.
+  pkill -KILL -x "gamescope-wl"    2>/dev/null || true
+  pkill -KILL -x "gamescopereaper" 2>/dev/null || true
   pkill -KILL -f "winedevice.exe.*${WINEPREFIX}" 2>/dev/null || true
 
-  # Shut down the wineserver for our prefix only — flushes pending registry
-  # writes and reaps any remaining Wine helper processes.
-  # Scoped by WINEPREFIX so other Wine prefixes and games are unaffected.
+  # Shut down the wineserver for our prefix only. This flushes pending
+  # registry writes and reaps any remaining Wine helper processes.
+  # Scoped by WINEPREFIX so other Wine prefixes and games are not affected.
   WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
 
-  # Remove temp files created during this session.
+  # Remove temp files created during this launcher session.
   [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
   [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
 }
@@ -4385,7 +4412,12 @@ EOF
   # overwritten when Steam exits — wiping any changes we write now. We warn the
   # user and give them a chance to close Steam before we proceed. We never
   # launch or kill Steam ourselves; that's the user's decision.
-  if pgrep -x "steam" > /dev/null 2>&1; then
+  # Detect Steam running under any of: native, Flatpak, or Snap packaging.
+  # pgrep -x "steam" only matches the native binary name. Flatpak Steam runs
+  # as "steam" inside a container but its host-visible process may differ.
+  # We also check for the Flatpak host process name.
+  if pgrep -x "steam" > /dev/null 2>&1 \
+     || pgrep -f "com.valvesoftware.Steam" > /dev/null 2>&1; then
     warn_msg "Steam is currently running."
     warn_msg "Steam holds shortcuts.vdf open and will overwrite it when it closes."
     warn_msg "For the shortcut to survive, close Steam first:"
@@ -4400,27 +4432,31 @@ EOF
         skip_steam="true"
       fi
     else
-      # In auto mode we write the shortcut anyway. Steam will overwrite it on
-      # exit but the files are correct — the user can restart Steam afterwards
-      # and the shortcut will appear on the next launch.
+      # In auto mode, write the shortcut now. Steam will overwrite it when it
+      # exits, but the files will be correct — the user can restart Steam and
+      # the shortcut will appear on the next launch.
       info_msg "Auto mode: writing Steam shortcut now. Restart Steam afterwards to see it."
     fi
   fi
 
   if [[ "${skip_steam}" == "false" ]]; then
     local candidate
+    # Search all known Steam installation locations, including native, Flatpak,
+    # and Snap. Multiple may exist on the same system; we take the first found.
     for candidate in \
       "${HOME}/.steam/steam" \
       "${HOME}/.local/share/Steam" \
-      "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
-      if [[ -d "${candidate}" ]]; then
+      "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam" \
+      "${HOME}/.var/app/com.valvesoftware.Steam/data/Steam" \
+      "${HOME}/snap/steam/common/.steam/steam"; do
+      if [[ -d "${candidate}/userdata" ]]; then
         steam_root="${candidate}"
         break
       fi
     done
 
     if [[ -z "${steam_root}" ]]; then
-      warn_msg "Steam not found — skipping Steam integration."
+      warn_msg "Steam installation not found — skipping Steam integration."
       warn_msg "To add manually: add ${LAUNCHER_SCRIPT} as a non-Steam game in Steam."
     elif ! command_exists python3; then
       warn_msg "Python 3 not available — skipping Steam integration."
@@ -4429,7 +4465,8 @@ EOF
       local steam_user=""
       if [[ -d "${steam_userdata}" ]]; then
         # Pick the most-recently-modified userdata subdirectory as the active
-        # Steam account. stat -c %Y is more portable than find -printf '%T@'.
+        # Steam account. stat -c %Y is more portable than find -printf '%T@'
+        # (which is a GNU extension not available on all systems).
         steam_user=$(
           find "${steam_userdata}" -maxdepth 1 -mindepth 1 -type d \
             2>/dev/null \
