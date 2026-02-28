@@ -4391,77 +4391,6 @@ if [[ -s "${_bootstrap_tmp}" ]]; then
   _game_args+=("-content_bootstrap_shm=${_shm_name}")
 fi
 
-# Cleanup: kill all processes we spawned whenever the launcher exits — whether
-# the game closed normally, was interrupted (Ctrl+C), or received SIGTERM.
-# When the game exits, shm_launcher.exe returns and wait completes, but Wine
-# background processes (winedevice.exe) stay alive until explicitly killed. 
-# We always clean them up here.
-#
-# Wine is launched via setsid, making it a session leader.
-# Its SID == its PID, so we kill by session: pkill -s PID sends the signal
-# to every process in that session regardless of how many process groups Wine
-# has spawned internally (winedevice.exe, services.exe, etc.).
-_kill_session() {
-  local pid="${1:-}"
-  [[ -z "${pid}" || "${pid}" == "0" ]] && return
-
-  # Kill the entire process group (negative PID = group leader).
-  # setsid makes the launched process both session leader and process group
-  # leader (PGID == PID), so kill -- -PID reaches all processes in the group.
-  # We use -9 (SIGKILL) immediately for children to ensure Steam doesn't linger.
-  kill -KILL -- "-${pid}" 2>/dev/null || true
-
-  # Also kill by session ID — catches processes that called setsid themselves.
-  pkill -KILL -s "${pid}" 2>/dev/null || true
-
-  # Kill by parent PID as an additional sweep for any orphaned children.
-  pkill -KILL -P "${pid}" 2>/dev/null || true
-
-  # Wait up to 1 second for the process group leader to exit.
-  local _w=0
-  while kill -0 "${pid}" 2>/dev/null && (( _w < 10 )); do
-    sleep 0.1; (( _w++ )) || true
-  done
-
-  # Force-kill leader if still alive.
-  kill -KILL "${pid}" 2>/dev/null || true
-}
-
-_cleanup() {
-  # Remove the trap to prevent recursion if _cleanup is called more than once.
-  trap '' EXIT INT TERM HUP
-
-  # Step 1: Kill gamescope components explicitly by name.
-  # Steam tracks these; they MUST be gone for Steam to stop the 'Running' state.
-  pkill -9 -x "gamescope-wl"    2>/dev/null || true
-  pkill -9 -f "gamescopereaper" 2>/dev/null || true
-  pkill -9 -x "Xwayland"        2>/dev/null || true
-
-  # Step 2: Kill gamescope and Wine process groups and sessions.
-  # By the time _cleanup runs gamescope may have already exited cleanly.
-  # _kill_session handles dead PIDs safely.
-  _kill_session "${_GS_PID:-}"
-  _kill_session "${_WINE_PID:-}"
-
-  # Step 3: Graceful wineserver shutdown — terminates winedevice.exe,
-  # services.exe, plugplay.exe and all Wine helpers for our specific prefix.
-  # Followed by -9 to ensure winedevice.exe doesn't hang Steam.
-  WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
-  pkill -9 -f "winedevice.exe" 2>/dev/null || true
-  
-  # Step 4: Wait for wineserver to fully stop.
-  WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -w 2>/dev/null || true
-
-  # Step 5: Final sweep for any orphans specifically in our session.
-  _kill_session "${_WINE_PID:-}"
-
-  # Step 6: Remove temp files created during this launcher session.
-  [[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
-  [[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
-}
-
-trap _cleanup EXIT INT TERM HUP
-
 # ---- Launch ---------------------------------------------------------------
 
 # Prepare final command.
@@ -4481,66 +4410,50 @@ else
   _launch_cmd=("${WINE}")
 fi
 
-_launch_gamescope() {
-  # Launch gamescope wrapping the game.
-  # gamescope -- <cmd> makes gamescope exit when gamescopereaper exits, but
-  # gamescopereaper may outlive the game. We use a sentinel file to detect
-  # when shm_launcher / wine has exited, then kill gamescope explicitly.
-  local _gs_cmd=("$@")
-  local _sentinel
-  _sentinel=$(mktemp)
-
-  # Wrap the launch command: when wine/shm_launcher exits, remove the
-  # sentinel file so the poll loop below detects game exit.
-  # bash -c 'script' argv0 arg1 arg2...: $0=argv0, $1..=args, "$@" expands
-  # all positional args except $0. We pass the sentinel as the last arg and
-  # strip it before passing the rest to the game command.
-  # shellcheck disable=SC2086
-  setsid env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- \
-    bash -c 'sentinel=$1; shift; "$@"; rm -f "${sentinel}"' \
-      -- "${_sentinel}" "${_gs_cmd[@]}" &
-  _GS_PID=$!
-  _WINE_PID=${_GS_PID}
-
-  # Wait for the sentinel file to be removed (game exited) or gamescope to
-  # exit on its own (whichever comes first).
-  while kill -0 "${_GS_PID}" 2>/dev/null && [[ -f "${_sentinel}" ]]; do
-    sleep 0.5
-  done
-  rm -f "${_sentinel}"
-
-  # Game has exited — kill gamescope and its entire process group.
-  _kill_session "${_GS_PID}"
-
-  # Reap the background gamescope process to avoid a zombie.
-  wait "${_GS_PID}" 2>/dev/null || true
-}
-
 if [[ -s "${_bootstrap_tmp}" ]]; then
-  if [[ "${USE_GAMESCOPE}" == "true" ]]; then
-    _launch_gamescope "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
-      "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
-      "${_game_args[@]}"
-  else
-    setsid "${_launch_cmd[@]}" "${TOOLS_DIR}/shm_launcher.exe" \
-      "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" \
-      "${_game_args[@]}" &
-    _WINE_PID=$!
-    wait "${_WINE_PID}" || true
-  fi
+  _game_args=("${TOOLS_DIR}/shm_launcher.exe" "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" "${_game_args[@]}")
 else
-  if [[ "${USE_GAMESCOPE}" == "true" ]]; then
-    _launch_gamescope "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}"
-  else
-    setsid "${_launch_cmd[@]}" "${_game_exe}" "${_game_args[@]}" &
-    _WINE_PID=$!
-    wait "${_WINE_PID}" || true
-  fi
+  _game_args=("${_game_exe}" "${_game_args[@]}")
 fi
 
+if [[ "${USE_GAMESCOPE}" == "true" ]]; then
+  # shellcheck disable=SC2086
+  env DBUS_SESSION_BUS_ADDRESS=/dev/null ${GS_ARGS} -- "${_launch_cmd[@]}" "${_game_args[@]}" &
+  _PID=$!
+else
+  "${_launch_cmd[@]}" "${_game_args[@]}" &
+  _PID=$!
+fi
 
-# The EXIT trap (_cleanup) fires here automatically when this script exits,
-# killing any remaining gamescope/Wine processes and removing temp files.
+# Pass termination signals to the child process so it can shut down gracefully.
+_term() {
+  trap '' INT TERM HUP
+  kill -TERM "${_PID}" 2>/dev/null || true
+  wait "${_PID}" 2>/dev/null || true
+}
+trap _term INT TERM HUP
+
+# Wait for the game (or gamescope) to exit normally.
+wait "${_PID}" 2>/dev/null || true
+
+# ---- Cleanup --------------------------------------------------------------
+trap '' EXIT INT TERM HUP
+
+# Graceful wineserver shutdown — terminates winedevice.exe, services.exe, 
+# plugplay.exe and all Wine helpers for our specific prefix.
+WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -k 2>/dev/null || true
+# Wait for wineserver to fully stop so Steam doesn't see it as "Running".
+WINEPREFIX="${WINEPREFIX}" "${WINESERVER}" -w 2>/dev/null || true
+
+# Kill gamescope components explicitly by name as a fallback.
+# These UI components can sometimes survive if gamescope crashed.
+pkill -9 -x "gamescope-wl"    2>/dev/null || true
+pkill -9 -f "gamescopereaper" 2>/dev/null || true
+
+# Remove temp files created during this launcher session.
+[[ -n "${_bootstrap_tmp:-}" ]] && rm -f "${_bootstrap_tmp}"
+[[ -n "${_oidc_tmp:-}" ]] && rm -f "${_oidc_tmp}"
+
 exit 0
 
 LAUNCHEOF
