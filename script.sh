@@ -175,12 +175,12 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-# Desktop icon: PNG extracted from the Steam community ICO (via ImageMagick) or
-# the portrait poster JPG as a fallback. PNG is used instead of ICO because most
-# Linux desktop environments (GNOME, KDE, XFCE) do not render .ico files reliably
-# via absolute path in Icon=. The ICO itself is kept at STEAM_ICO_PATH for use
-# in the Steam shortcuts.vdf "icon" field where ICO is the correct format.
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"  # game icon (PNG for .desktop Icon= field)
+# Desktop icon: the ICO extracted directly from the game EXE via unzip.
+# The ICO contains multiple frames (32×32, 256×256, etc.) so it renders
+# crisply at all sizes. Modern Linux DEs (GNOME, KDE Plasma, XFCE 4.16+)
+# support ICO files natively when referenced by absolute path in Icon=.
+# The Steam shortcuts.vdf "icon" field also expects an ICO path.
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.ico"  # game icon (ICO for Icon= and shortcuts.vdf)
 readonly ICON_POSTER_PATH="${ICON_DIR}/cluckers-central.jpg"  # portrait poster (600×900), Steam grid only
 
 readonly APP_NAME="Cluckers Central"
@@ -3740,8 +3740,6 @@ XDLL_B64_EOF
   step_msg "Step 7 — Downloading game assets..."
 
   mkdir -p "${ICON_DIR}"
-  mkdir -p "${ICON_DIR}/hicolor/32x32/apps"
-  mkdir -p "${ICON_DIR}/hicolor/256x256/apps"
   mkdir -p "${STEAM_ASSETS_DIR}"
 
   if command_exists curl; then
@@ -3776,17 +3774,16 @@ XDLL_B64_EOF
     #
     # The Steam CDN ICO (STEAM_ICO_PATH) is still downloaded because Steam's
     # shortcuts.vdf requires a path to an ICO file in its "icon" field.
-    local _hicolor_32="${ICON_DIR}/hicolor/32x32/apps"
-    local _hicolor_256="${ICON_DIR}/hicolor/256x256/apps"
-    local _icon_name="cluckers-central"  # matches Icon= in .desktop
-    mkdir -p "${_hicolor_32}" "${_hicolor_256}"
-
     # Download the Steam CDN ICO for shortcuts.vdf (not used as desktop icon).
     curl ${CURL_FLAGS}f -o "${STEAM_ICO_PATH}" "${STEAM_ICO_URL}" || true
 
-    # Extract 1.ico from the game EXE and convert to PNG for the desktop icon.
+    # Extract the game icon from the EXE and install it as the desktop icon.
+    # The Realm Royale EXE stores its icon at .rsrc/ICON/1.ico in a format
+    # that unzip can read directly. The ICO contains multiple frames
+    # (32×32, 256×256, etc.) and is installed as-is — no conversion needed.
+    # Modern Linux DEs (GNOME, KDE Plasma, XFCE 4.16+) render ICO files
+    # natively when referenced by absolute path in the Icon= field.
     local _game_exe="${GAME_DIR}/${GAME_EXE_REL}"
-    local _exe_ico="${STEAM_ASSETS_DIR}/icon_exe.ico"
     if [[ ! -f "${_game_exe}" ]]; then
       warn_msg "Game EXE not found — desktop icon cannot be installed yet."
       warn_msg "Re-run setup after downloading the game to install the icon."
@@ -3794,64 +3791,11 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      # Extract the icon resource from the EXE. unzip -p pipes the file to
-      # stdout; we redirect to a temp ICO file. The -j flag is not needed
-      # since we reference the exact internal path.
-      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${_exe_ico}" 2>/dev/null \
-         && [[ -s "${_exe_ico}" ]]; then
-        ok_msg "Game icon extracted from EXE (.rsrc/ICON/1.ico)."
-
-        # Convert the multi-frame ICO to PNG using Pillow and install it.
-        python3 - "${_exe_ico}" \
-                 "${_hicolor_32}/${_icon_name}.png" \
-                 "${_hicolor_256}/${_icon_name}.png" \
-                 "${ICON_PATH}" << 'ICO2PNG_EOF'
-import sys, shutil
-from PIL import Image
-
-try:
-    ico_path = sys.argv[1]
-    out_32   = sys.argv[2]
-    out_256  = sys.argv[3]
-    out_flat = sys.argv[4]
-
-    img = Image.open(ico_path)
-
-    # Collect all frame sizes and sort largest-first.
-    if hasattr(img, 'ico') and img.ico.sizes():
-        sizes = sorted(img.ico.sizes(), key=lambda s: s[0] * s[1], reverse=True)
-    else:
-        sizes = [img.size]
-
-    # 32x32 slot: use the smallest native frame >= 32x32; resize if none.
-    best_32 = next((s for s in reversed(sizes) if s[0] >= 32), sizes[0])
-    f32 = img.ico.getimage(best_32).convert("RGBA") if hasattr(img, 'ico') \
-          else img.convert("RGBA")
-    if f32.size != (32, 32):
-        f32 = f32.resize((32, 32), Image.LANCZOS)
-    f32.save(out_32, "PNG")
-
-    # 256x256 slot: largest available frame, resized to exactly 256x256.
-    largest = sizes[0]
-    fl = img.ico.getimage(largest).convert("RGBA") if hasattr(img, 'ico') \
-         else img.convert("RGBA")
-    fl.resize((256, 256), Image.LANCZOS).save(out_256, "PNG")
-
-    # Flat fallback: some DEs resolve Icon= by absolute path before the theme.
-    shutil.copy2(out_256, out_flat)
-
-    print(f"[icon] {largest[0]}x{largest[1]} frame → hicolor 32x32, 256x256 + flat fallback.")
-    sys.exit(0)
-except Exception as e:
-    print(f"[icon] ICO to PNG conversion failed: {e}", file=sys.stderr)
-    sys.exit(1)
-ICO2PNG_EOF
-        if [[ $? -ne 0 ]]; then
-          warn_msg "ICO to PNG conversion failed — install Pillow: pip install pillow"
-        fi
-        rm -f "${_exe_ico}"
+      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${ICON_PATH}" 2>/dev/null \
+         && [[ -s "${ICON_PATH}" ]]; then
+        ok_msg "Game icon installed at ${ICON_PATH}."
       else
-        rm -f "${_exe_ico}"
+        rm -f "${ICON_PATH}"
         warn_msg "Could not extract icon from game EXE — desktop icon will be missing."
       fi
     fi
@@ -3864,22 +3808,6 @@ ICO2PNG_EOF
       warn_msg "Grid poster unavailable — portrait poster slot will be empty."
     fi
 
-    # Refresh the icon theme cache so the new icon appears immediately in
-    # application menus. Different desktop environments use different tools:
-    #   gtk-update-icon-cache — GNOME, XFCE, and most GTK-based desktops.
-    #   xdg-icon-resource     — portable XDG method, works across DEs.
-    #   kbuildsycoca5/6       — KDE Plasma 5/6 service cache (optional).
-    if command_exists gtk-update-icon-cache; then
-      gtk-update-icon-cache -f -t "${ICON_DIR}/hicolor" 2>/dev/null || true
-    fi
-    if command_exists xdg-icon-resource; then
-      xdg-icon-resource forceupdate --theme hicolor 2>/dev/null || true
-    fi
-    if command_exists kbuildsycoca6; then
-      kbuildsycoca6 2>/dev/null || true
-    elif command_exists kbuildsycoca5; then
-      kbuildsycoca5 2>/dev/null || true
-    fi
   fi
 
   # --------------------------------------------------------------------------
@@ -4439,7 +4367,7 @@ Name=${APP_NAME}
 Comment=Play Cluckers Central (Realm Royale) on Linux
 Exec=${LAUNCHER_SCRIPT}
 Path=${HOME}/.local/bin
-Icon=cluckers-central
+Icon=${ICON_PATH}
 Terminal=false
 Type=Application
 Categories=Game;
