@@ -179,7 +179,7 @@ readonly LAUNCHER_SCRIPT="${HOME}/.local/bin/cluckers-central.sh"
 # (GNOME, KDE, etc.) so you can launch it just like a native Linux app.
 readonly DESKTOP_FILE="${HOME}/.local/share/applications/cluckers-central.desktop"
 readonly ICON_DIR="${HOME}/.local/share/icons"
-readonly ICON_PATH="${ICON_DIR}/cluckers-central.png"
+readonly ICON_PATH="${ICON_DIR}/cluckers-central.jpg"
 
 readonly APP_NAME="Cluckers Central"
 
@@ -205,39 +205,45 @@ readonly REALM_ROYALE_APPID="813820"
 readonly STEAM_ASSET_BASE="https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${REALM_ROYALE_APPID}"
 
 # High-quality art assets fetched from the Steam CDN.
-# All URLs verified against https://store.steampowered.com/app/813820
-# and the img-sauce file in this repository.
+# All URLs and their Steam slot names verified directly from img-sauce.
 #
-# URL reference (from img-sauce):
-#   logo_2x.png              — transparent logo overlay   (PNG, ~429 KB)
-#   library_600x900_2x.jpg   — vertical portrait poster   (JPG, ~198 KB)
-#   library_hero_2x.jpg      — hero / background banner   (JPG, ~779 KB)
-#   capsule_616x353.jpg      — wide capsule / landscape   (JPG,  ~96 KB)
-#   header.jpg               — small header / store tile  (JPG,  ~55 KB)
-#   hero_capsule.jpg         — secondary hero capsule art (JPG,  ~86 KB)
+# img-sauce label        → filename                    Steam grid/ slot
+# ─────────────────────────────────────────────────────────────────────
+# library_capsule     2x → library_600x900_2x.jpg      portrait poster  (suffix: p)
+# library_hero        2x → library_hero_2x.jpg          hero background  (suffix: _hero)
+# logo                2x → logo_2x.png                  logo overlay     (suffix: _logo)
+# main_capsule           → capsule_616x353.jpg           wide capsule     (suffix: empty)
+# header                 → header.jpg                    store header     (suffix: _header)
+# community_icon         → 068664cf...jpg               game icon        (suffix: _icon)
 #
-# The icon: Steam's community .ico is only a 32×32 BMP (4 KB). We instead
-# use header.jpg (460×215, Steam's store header/capsule image) as the desktop
-# and Steam shortcut icon. It is the best available option: recognisable at
-# small sizes and a reasonable aspect ratio. See icon download section below
-# for a full comparison of alternatives.
+# logo_position from img-sauce (written verbatim to localconfig.vdf):
+#   pinned_position: BottomLeft
+#   width_pct:  36.44186046511628
+#   height_pct: 100
 readonly STEAM_LOGO_URL="${STEAM_ASSET_BASE}/logo_2x.png?t=1739811771"
 readonly STEAM_GRID_URL="${STEAM_ASSET_BASE}/library_600x900_2x.jpg?t=1739811771"
 readonly STEAM_HERO_URL="${STEAM_ASSET_BASE}/library_hero_2x.jpg?t=1739811771"
 readonly STEAM_WIDE_URL="${STEAM_ASSET_BASE}/capsule_616x353.jpg?t=1739811771"
 readonly STEAM_HEADER_URL="${STEAM_ASSET_BASE}/header.jpg?t=1739811771"
-readonly STEAM_ICON_URL="https://shared.fastly.steamstatic.com/community_assets/images/apps/813820/c59e5deabf96d228085fe122772251dfa526b9e2.ico"
+# community_icon: the designated game icon from Steam's own asset metadata.
+# Hash from img-sauce: 068664cf452a9f2388cf1ccf1f239fc967ff9629.jpg
+# This is what Steam uses as the game's icon in the community and library.
+readonly STEAM_ICON_URL="https://shared.fastly.steamstatic.com/community_assets/images/apps/813820/068664cf452a9f2388cf1ccf1f239fc967ff9629.jpg"
 
 readonly STEAM_ASSETS_DIR="${CLUCKERS_ROOT}/assets"
+# Asset paths — filenames match their purpose for clarity.
+# Sources verified against img-sauce (see img-sauce file in this repo):
+#   library_capsule  → library_600x900_2x.jpg  (portrait poster, 600×900)
+#   library_hero     → library_hero_2x.jpg      (hero background, 1920×620)
+#   logo             → logo_2x.png              (transparent overlay logo)
+#   main_capsule     → capsule_616x353.jpg       (wide/horizontal capsule)
+#   community_icon   → 068664cf...jpg            (designated game icon)
 readonly STEAM_LOGO_PATH="${STEAM_ASSETS_DIR}/logo.png"
 readonly STEAM_GRID_PATH="${STEAM_ASSETS_DIR}/grid.jpg"
 readonly STEAM_HERO_PATH="${STEAM_ASSETS_DIR}/hero.jpg"
 readonly STEAM_WIDE_PATH="${STEAM_ASSETS_DIR}/wide.jpg"
 readonly STEAM_HEADER_PATH="${STEAM_ASSETS_DIR}/header.jpg"
-# The icon is downloaded as .ico (Steam CDN format) and then we extract the
-# largest embedded PNG frame for use as the desktop icon and Steam shortcut icon.
-readonly STEAM_ICON_PATH="${STEAM_ASSETS_DIR}/icon.ico"
-readonly STEAM_ICON_PNG_PATH="${STEAM_ASSETS_DIR}/icon.png"
+readonly STEAM_ICON_PATH="${STEAM_ASSETS_DIR}/icon.jpg"
 
 # Directory where the two helper .exe / .dll binaries are stored after setup.
 readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
@@ -3743,25 +3749,14 @@ XDLL_B64_EOF
     curl ${CURL_FLAGS}f -o "${STEAM_WIDE_PATH}"   "${STEAM_WIDE_URL}"   || true
     curl ${CURL_FLAGS}f -o "${STEAM_HEADER_PATH}" "${STEAM_HEADER_URL}" || true
 
-    # Download the game icon (.ico) from Steam CDN and keep it as a reference.
-    # Steam's community icon for Realm Royale is a tiny 32x32 BMP-encoded .ico
-    # with no embedded PNG frames, so it is not suitable for modern displays.
-    curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}" || true
-
-    # Use header.jpg (460×215) as the desktop shortcut and Steam icon.
-    # From img-sauce this is Steam's own store header image — it is the closest
-    # match to a proper application icon: recognisable at small sizes and not
-    # squished. Alternatives considered:
-    #   logo_2x.png      — wide transparent overlay, letterboxes badly in icons
-    #   library_600x900  — portrait poster, too tall for icon slots
-    #   capsule_231x87   — very small (87px tall), blurry when scaled up
-    #   header.jpg       — 460×215, best aspect ratio available ✓
-    if [[ -f "${STEAM_HEADER_PATH}" ]]; then
-      cp "${STEAM_HEADER_PATH}" "${STEAM_ICON_PNG_PATH}"
-      cp "${STEAM_ICON_PNG_PATH}" "${ICON_PATH}"
+    # Download the community_icon — the designated game icon from img-sauce.
+    # This is the image Steam itself labels as "community_icon" in its asset
+    # metadata. It is used for the desktop shortcut and the Steam icon field.
+    if curl ${CURL_FLAGS}f -o "${STEAM_ICON_PATH}" "${STEAM_ICON_URL}"; then
+      cp "${STEAM_ICON_PATH}" "${ICON_PATH}"
       ok_msg "High-quality Steam assets downloaded."
     else
-      warn_msg "Header image unavailable — desktop shortcut will use a fallback icon."
+      warn_msg "Community icon unavailable — desktop shortcut will use a fallback icon."
     fi
   fi
 
@@ -4394,7 +4389,6 @@ EOF
       STEAM_WIDE_PATH_ENV="${STEAM_WIDE_PATH}" \
       STEAM_HEADER_PATH_ENV="${STEAM_HEADER_PATH}" \
       STEAM_ICON_PATH_ENV="${STEAM_ICON_PATH}" \
-      STEAM_ICON_PNG_PATH_ENV="${STEAM_ICON_PNG_PATH}" \
       python3 - << 'PYEOF'
 """Adds Cluckers Central to Steam as a non-Steam shortcut."""
 
@@ -4414,7 +4408,7 @@ STEAM_HERO      = os.environ["STEAM_HERO_PATH_ENV"]
 STEAM_LOGO      = os.environ["STEAM_LOGO_PATH_ENV"]
 STEAM_WIDE      = os.environ["STEAM_WIDE_PATH_ENV"]
 STEAM_HEADER    = os.environ["STEAM_HEADER_PATH_ENV"]
-STEAM_ICON_PNG  = os.environ.get("STEAM_ICON_PNG_PATH_ENV", "")
+STEAM_ICON      = os.environ.get("STEAM_ICON_PATH_ENV", "")
 
 _OK   = "  [\033[0;32m OK \033[0m]"
 _WARN = "  [\033[1;33mWARN\033[0m]"
@@ -4469,12 +4463,11 @@ try:
     # Source: Valve's internal format, reproduced by steam-rom-manager.
     quoted_exe = f'"{LAUNCHER}"'
     start_dir  = f'"{os.path.dirname(LAUNCHER)}"'
-    # Use header.jpg (460×215) as the icon — the store header/capsule image
-    # is the best available option at a reasonable aspect ratio for icon slots.
+    # Use the community_icon (designated by img-sauce as the game icon).
     icon_path = (
-        STEAM_ICON_PNG
-        if STEAM_ICON_PNG and os.path.exists(STEAM_ICON_PNG)
-        else os.environ.get("STEAM_ICON_PATH_ENV", ICON_PATH)
+        STEAM_ICON
+        if STEAM_ICON and os.path.exists(STEAM_ICON)
+        else ICON_PATH
     )
     # LaunchOptions: leave empty — the launcher script handles gamescope
     # and all launch arguments internally. Putting gamescope here would cause
@@ -4534,13 +4527,21 @@ try:
     grid_dir = os.path.join(USER_CONFIG_DIR, "..", "grid")
     os.makedirs(grid_dir, exist_ok=True)
 
-    # Canonical artwork suffix mapping.
+    # Canonical artwork suffix mapping — verified from img-sauce labels.
+    # img-sauce label   → Steam grid/ suffix → source file
+    # library_capsule   → p                  → library_600x900_2x.jpg
+    # main_capsule      → (empty)            → capsule_616x353.jpg
+    # library_hero      → _hero              → library_hero_2x.jpg
+    # logo              → _logo              → logo_2x.png
+    # header            → _header            → header.jpg
+    # community_icon    → _icon              → 068664cf...jpg
     art_map = {
-        STEAM_GRID:   "p",        # Vertical poster  (600×900)
-        STEAM_WIDE:   "",         # Horizontal grid  (920×430)
-        STEAM_HERO:   "_hero",    # Hero background  (1920×620)
-        STEAM_LOGO:   "_logo",    # Clear logo       (any, PNG)
-        STEAM_HEADER: "_header",  # Small header     (460×215)
+        STEAM_GRID:   "p",       # library_capsule  (600×900 portrait poster)
+        STEAM_WIDE:   "",        # main_capsule     (616×353 wide capsule)
+        STEAM_HERO:   "_hero",   # library_hero     (1920×620 background)
+        STEAM_LOGO:   "_logo",   # logo             (transparent overlay)
+        STEAM_HEADER: "_header", # header           (store header tile)
+        STEAM_ICON:   "_icon",   # community_icon   (game icon)
     }
 
     # Steam uses the 32-bit unsigned CRC as the prefix for grid/ filenames.
