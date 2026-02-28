@@ -3794,11 +3794,21 @@ XDLL_B64_EOF
       warn_msg "unzip not found — desktop icon cannot be installed."
       warn_msg "Install unzip: sudo apt install unzip  (or your distro's equivalent)"
     else
-      # Extract .rsrc/ICON/1.ico from the game EXE. All icon frames in this
-      # EXE are the same size, so 1.ico is sufficient.
-      if unzip -p "${_game_exe}" '.rsrc/ICON/1.ico' > "${_exe_ico}" 2>/dev/null \
-         && [[ -s "${_exe_ico}" ]]; then
-        ok_msg "Game icon extracted from EXE (.rsrc/ICON/1.ico)."
+      # Extract the icon from the game EXE. The internal path varies by build
+      # toolchain. List all .rsrc/ICON entries and try each in turn.
+      local _ico_path=""
+      while IFS= read -r _ico_path; do
+        [[ -z "${_ico_path}" ]] && continue
+        unzip -p "${_game_exe}" "${_ico_path}" > "${_exe_ico}" 2>/dev/null \
+          && [[ -s "${_exe_ico}" ]] && break
+        rm -f "${_exe_ico}"
+        _ico_path=""
+      done < <(unzip -l "${_game_exe}" 2>/dev/null \
+               | awk '{print $NF}' \
+               | grep -iE '\.rsrc/ICON/[^/]+$')
+
+      if [[ -s "${_exe_ico}" ]]; then
+        ok_msg "Game icon extracted from EXE (${_ico_path})."
         # Convert the ICO to PNG using Pillow.
         python3 - "${_exe_ico}" "${ICON_PATH}" \
                    "${ICON_DIR}/hicolor/256x256/apps/cluckers-central.png" << 'ICO2PNG_EOF'
@@ -4326,30 +4336,13 @@ _launch_gamescope() {
   _GS_PID=$!
   _WINE_PID=${_GS_PID}
 
-  # Give gamescope and gamescopereaper a moment to fork wine.
-  sleep 2
+  # gamescope is launched with -- which causes it to exit when its primary
+  # child (gamescopereaper -> wine) exits. Simply wait on gamescope directly.
+  # When the game closes, gamescope exits, wait returns, and we fall through
+  # to exit 0 which triggers the EXIT trap (_cleanup).
+  wait "${_GS_PID}" || true
 
-  # Find the wine child process under gamescope's session.
-  # pgrep -s searches by session ID (SID == _GS_PID since we used setsid).
-  # We look for wine or shm_launcher in the session.
-  local _wine_child
-  _wine_child=$(pgrep -s "${_GS_PID}" -f "wine\|shm_launcher" 2>/dev/null | head -1)
-
-  if [[ -n "${_wine_child}" ]]; then
-    # Poll until the wine/shm_launcher process exits. We cannot use bash's
-    # wait built-in on a grandchild process (only direct children of the
-    # shell can be waited on). kill -0 checks if the process still exists
-    # without sending a signal — it returns non-zero when the PID is gone.
-    _WINE_PID="${_wine_child}"
-    while kill -0 "${_WINE_PID}" 2>/dev/null; do
-      sleep 0.5
-    done
-  else
-    # Could not find wine child — wait on gamescope directly.
-    wait "${_GS_PID}" || true
-  fi
-
-  # Game has exited — kill gamescope and all its children.
+  # Belt-and-suspenders: kill gamescope session in case it is still alive.
   _kill_session "${_GS_PID}"
 }
 
