@@ -4201,6 +4201,15 @@ done
   # Exit on error, undefined variable, or pipe failure.
   set -euo pipefail
 
+  # Legacy Steam environment variables required by ProtonFixes and some
+  # networking components to correctly identify the game and user.
+  export SteamAppId="813820"
+  export SteamGameId="813820"
+  export STEAM_COMPAT_APP_ID="813820"
+  export SteamUser="${USER}"
+  export SteamAppUser="${USER}"
+  export SteamClientLaunch="1"
+
   # Set PATH and LD_LIBRARY_PATH to include Wine's internal libraries and
   # binaries. Prepend them to any existing paths.
   ${_launcher_wine_env}
@@ -4471,9 +4480,6 @@ if [[ -n "${PROTON_SCRIPT}" ]]; then
     if [[ -d "${_cand}" ]]; then _steam_root="${_cand}"; break; fi
   done
   export STEAM_COMPAT_CLIENT_INSTALL_PATH="${_steam_root}"
-  
-  export SteamGameId="813820"
-  export SteamAppId="813820"
   
   # Prepare the launch command. We use 'env -u' to strip environment variables 
   # that conflict with Proton's internal management without unsetting them
