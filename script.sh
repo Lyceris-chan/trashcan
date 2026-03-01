@@ -4474,8 +4474,8 @@ if [[ -n "${PROTON_SCRIPT}" ]]; then
   done
   export STEAM_COMPAT_CLIENT_INSTALL_PATH="${_steam_root}"
   
-  export SteamGameId="0"
-  export SteamAppId="0"
+  export SteamGameId="813820"
+  export SteamAppId="813820"
   
   # Prepare the launch command. We use 'env -u' to strip environment variables 
   # that conflict with Proton's internal management without unsetting them
