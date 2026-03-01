@@ -4137,6 +4137,54 @@ ICOEXT_EOF
     fi
   fi
 
+  # Pre-compute launcher strings to avoid subshell expansion issues inside the heredoc.
+  local _launcher_wine_env=""
+  if [[ -z "${real_proton_script}" ]]; then
+    local _env_adds="$(get_wine_env_additions "${real_wine_path}")"
+    local _bin_add="${_env_adds%%|*}"
+    local _temp="${_env_adds#*|}"
+    local _lib_add="${_temp%%|*}"
+    local _loader_add="${_env_adds##*|}"
+    _launcher_wine_env="export PATH=\"${_bin_add}:\${PATH}\"
+export LD_LIBRARY_PATH=\"${_lib_add}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}\"
+export WINELOADER=\"${_loader_add}\""
+  fi
+
+  local _launcher_overrides="dxgi=n"
+  if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
+    _launcher_overrides="dxgi=n;xinput1_3=n"
+  fi
+  if [[ "${wayland_cursor_fix}" == "true" ]]; then
+    _launcher_overrides="${_launcher_overrides};winex11.drv="
+  fi
+
+  local _launcher_sdl_logic=""
+  if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
+    _launcher_sdl_logic="export SDL_JOYSTICK_HIDAPI=0
+export SDL_JOYSTICK_HIDAPI_PS4=0
+export SDL_JOYSTICK_HIDAPI_PS5=0
+export SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1
+
+_sdl_db=\"\"
+for _db_path in \\
+  \"\${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt\" \\
+  \"\${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt\" \\
+  \"/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt\" \\
+  \"/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt\"; do
+  if [[ -f \"\${_db_path}\" ]]; then _sdl_db=\"\${_db_path}\"; break; fi
+done
+[[ -n \"\${_sdl_db}\" ]] && export SDL_GAMECONTROLLERCONFIG_FILE=\"\${_sdl_db}\""
+  fi
+
+  local _launcher_sync_logic=""
+  if [[ "${_is_proton}" == "true" ]]; then
+    if [[ -c /dev/ntsync ]]; then
+      _launcher_sync_logic="export WINE_NTSYNC=1"
+    else
+      _launcher_sync_logic="export WINEFSYNC=1"
+    fi
+  fi
+
   mkdir -p "$(dirname "${LAUNCHER_SCRIPT}")"
 
   local real_wineserver
@@ -4153,21 +4201,8 @@ ICOEXT_EOF
 set -euo pipefail
 
 # Set PATH and LD_LIBRARY_PATH to include Wine's internal libraries and
-# binaries so it can find essential DLLs like kernel32.dll even when run
-# outside of Steam. We prepend them to any existing paths.
-# We skip this if using a Proton script, as Proton handles its own environment.
-$(
-  if [[ -z "${real_proton_script}" ]]; then
-    _env_adds="$(get_wine_env_additions "${real_wine_path}")"
-    _bin_add="${_env_adds%%|*}"; _temp="${_env_adds#*|}"
-    _lib_add="${_temp%%|*}"; _loader_add="${_env_adds##*|}"
-    # shellcheck disable=SC2016
-    printf 'export PATH="%s:${PATH}"\n' "${_bin_add}"
-    # shellcheck disable=SC2016
-    printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "${_lib_add}"
-    printf 'export WINELOADER="%s"\n' "${_loader_add}"
-  fi
-)
+# binaries. Prepend them to any existing paths.
+${_launcher_wine_env}
 
 export CLUCKERS_ROOT="${CLUCKERS_ROOT}"
 export WINEPREFIX="${WINEPREFIX}"
@@ -4175,7 +4210,6 @@ export WINEARCH="win64"
 
 # Setup-time variables baked in as plain strings.
 USE_GAMESCOPE="${use_gamescope}"
-WAYLAND_CURSOR_FIX="${wayland_cursor_fix}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 GAME_DIR="${GAME_DIR}"
 GAME_EXE_REL="${GAME_EXE_REL}"
@@ -4187,90 +4221,19 @@ CREDS_FILE="${CLUCKERS_ROOT}/credentials.enc"
 # Suppress noisy Wine debug output. Set to "" to see full Wine diagnostics.
 export WINEDEBUG="-all"
 
-# dxgi=n,b:      use DXVK's dxgi instead of Wine's built-in (required for DX11 performance).
-# d3d11=n,b:    use DXVK's d3d11 — prevents the "file not found" ntdll crash caused by
-#               Wine's stub d3d11 calling missing ntdll entry points when the game calls
-#               Direct3D 11. Without this, the game crashes on startup with an ntdll error.
-# d3d10core=n,b: use DXVK's d3d10 implementation alongside d3d11 (they share the same
-#               DXVK library; both must be set native or neither will work).
-# xinput1_3=n:  use our custom xinput remapper installed in Step 6.
-# winex11.drv=: disables the winex11 driver. This does not break Proton-GE, but it
-#               will break the X11 connection. It forces Wine into using the
-#               Wayland driver instead. This is necessary to fix cursor warping
-#               (incorrect behavior or failing to confine the cursor to the game
-#               window) on Wayland-only desktop environments like COSMIC.
-#               Only applied if the user passes --wayland-cursor-fix.
-# Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
-$(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
-  _overrides="dxgi=n;xinput1_3=n"
-  if [[ "${wayland_cursor_fix}" == "true" ]]; then
-    _overrides="${_overrides};winex11.drv="
-  fi
-  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"  # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
-  # all joysticks. Without this, Wine's winebus.sys and SDL's HIDAPI layer both
-  # enumerate the same physical device, causing duplicate axis events and phantom
-  # camera spin in UE3 games. SDL_HINT_JOYSTICK_HIDAPI_PS4 / _PS5 are per-device
-  # overrides for the same hint applied specifically to DualShock 4 / DualSense.
-  # Source (hint definition): https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
-  #   SDL_HINT_JOYSTICK_HIDAPI          ~line 828
-  #   SDL_HINT_JOYSTICK_HIDAPI_PS4      ~line 969
-  # Source (Wine SDL joystick backend): https://gitlab.winehq.org/wine/wine/-/blob/master/dlls/winebus.sys/main.c
-  printf 'export SDL_JOYSTICK_HIDAPI=0\n'
-  printf 'export SDL_JOYSTICK_HIDAPI_PS4=0\n'
-  printf 'export SDL_JOYSTICK_HIDAPI_PS5=0\n'
-  # SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS — when set to "1", SDL continues
-  # delivering joystick events even when the application window does not have
-  # focus. UE3's ServerTravel (lobby→match transition) briefly defocuses the
-  # window; without this hint SDL silences all joystick axis/button events during
-  # that window, compounding the XInputEnable(FALSE) issue our xinput1_3.dll fixes.
-  # Source: https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
-  #         SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS ~line 693
-  printf 'export SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1\n'
-  # SDL_HINT_GAMECONTROLLERCONFIG_FILE — path to a community gamecontrollerdb.txt
-  # mapping file. SDL reads this file to override built-in button/axis mappings
-  # for any controller GUID. Fixes mis-mapped triggers, bumpers, and face buttons
-  # on non-Xbox controllers under Wine's SDL layer.
-  # Source: https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_hints.h
-  #         SDL_HINT_GAMECONTROLLERCONFIG_FILE ~line 513
-  # Community mapping database: https://github.com/gabomdq/SDL_GameControllerDB
-  # If the file exists in a standard location we export the path so Wine/SDL picks it up.
-  cat << 'SDLEOF'
-_sdl_db=""
-for _db_path in \
-  "${HOME}/.local/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
-  "${HOME}/.config/SDL_GameControllerDB/gamecontrollerdb.txt" \
-  "/usr/share/SDL_GameControllerDB/gamecontrollerdb.txt" \
-  "/usr/local/share/SDL_GameControllerDB/gamecontrollerdb.txt"; do
-  if [[ -f "${_db_path}" ]]; then _sdl_db="${_db_path}"; break; fi
-done
-[[ -n "${_sdl_db}" ]] && export SDL_GAMECONTROLLERCONFIG_FILE="${_sdl_db}"
-SDLEOF
-else
-  _overrides="dxgi=n"
-  if [[ "${wayland_cursor_fix}" == "true" ]]; then
-    _overrides="${_overrides};winex11.drv="
-  fi
-  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
-fi)
+# Force native overrides for performance and crash prevention.
+export WINEDLLOVERRIDES="${_launcher_overrides}"
+
+# SDL and controller configuration.
+${_launcher_sdl_logic}
 
 # Wine binary and optional Proton script resolved by find_wine() at setup time.
 WINE="${real_wine_path}"
 WINESERVER="${real_wineserver}"
 PROTON_SCRIPT="${real_proton_script}"
 
-# Sync primitives: ntsync (modern) or fsync (standard Proton fallback).
-# These improve game performance and reduce stutter by optimizing how
-# the game synchronizes background tasks with your CPU.
-# Supported by most modern Proton builds.
-$(if [[ "${_is_proton}" == "true" ]]; then
-  # Use ntsync if /dev/ntsync exists (requires a modern Linux kernel 6.10+).
-  # Otherwise fall back to fsync (standard Proton fallback).
-  if [[ -c /dev/ntsync ]]; then
-    printf 'export WINE_NTSYNC=1\n'
-  else
-    printf 'export WINEFSYNC=1\n'
-  fi
-fi)
+# Sync primitives (ntsync/fsync).
+${_launcher_sync_logic}
 
 # Ensure we run from the game directory for consistency.
 cd "\${GAME_DIR}"
