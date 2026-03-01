@@ -23,6 +23,7 @@
 #                                                 # Also triggered when both -g and -c are passed.
 #    ./cluckers-setup.sh --steam-deck             # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller             # opt-in: enable controller support   (-c)
+#    ./cluckers-setup.sh --wayland-cursor-fix     # opt-in: disable winex11 driver to fix cursor warping under Proton
 #    ./cluckers-setup.sh --update                 # check for game update       (-u)
 #    ./cluckers-setup.sh --uninstall              # remove everything
 #    ./cluckers-setup.sh --help                   # show this help message      (-h)
@@ -272,7 +273,7 @@ readonly TOOLS_DIR="${HOME}/.local/share/cluckers-central/tools"
 # embedded binary to guarantee you are running exactly the code we compiled —
 # not a modified or corrupted version. See the REPRODUCIBLE BUILDS section
 # inside Step 6 for full instructions on compiling and verifying yourself.
-readonly SHM_LAUNCHER_SHA256="f7dfcbcd2f70089696267ad7c725adeddf4b677c79bfd4e0c3435f800ee40f41"
+readonly SHM_LAUNCHER_SHA256="c04f364819e58b38903b3972358783efd3786c7b2b9139f6fd32473eb03bebb6"
 readonly XINPUT_DLL_SHA256="30c2cf5d35fb7489779ac6fa714c6f874868d58ec2e5f6623d9dd5a24ae503a9"
 
 # SHA-256 fingerprint of the embedded Steam Deck controller layout template.
@@ -655,6 +656,9 @@ install_sys_deps() {
 #
 # Arguments:
 #   $1  Package manager name (optional, for install instructions).
+#
+# Returns:
+#   0 on success; 1 on failure to install missing modules.
 ensure_python_deps() {
   local -r pkg_mgr="${1:-}"
   step_msg "Step 1c — Verifying Python dependencies (Pillow, blake3, vdf)..."
@@ -2599,6 +2603,7 @@ main() {
   local use_gamescope="false"
   local steam_deck="false"
   local controller_mode="false"
+  local wayland_cursor_fix="false"
   local resolved_version="${GAME_VERSION}"
   local VERSION_INFO_JSON=""
   local do_update="false"
@@ -2666,6 +2671,7 @@ main() {
         ;;
       --steam-deck|-d)   steam_deck="true"; use_gamescope="false"; controller_mode="true" ;;
       --controller|-c)   controller_mode="true" ;;
+      --wayland-cursor-fix) wayland_cursor_fix="true" ;;
       --no-controller)
         controller_mode="false"
         [[ -f "${controller_pref_file}" ]] && rm -f "${controller_pref_file}"
@@ -3430,7 +3436,7 @@ BLAKE3EOF
   #        sha256sum shm_launcher.exe xinput1_3.dll
   #
   #      Expected output (must match exactly — byte for byte):
-  #        f7dfcbcd2f70089696267ad7c725adeddf4b677c79bfd4e0c3435f800ee40f41  shm_launcher.exe
+  #        c04f364819e58b38903b3972358783efd3786c7b2b9139f6fd32473eb03bebb6  shm_launcher.exe
   #        30c2cf5d35fb7489779ac6fa714c6f874868d58ec2e5f6623d9dd5a24ae503a9  xinput1_3.dll
   #
   #      If the checksums match, your compiled binary is identical to the one
@@ -3454,14 +3460,21 @@ BLAKE3EOF
   #
   # ==============================================================================
   # SOURCE CODE: shm_launcher.c (https://github.com/0xc0re/cluckers/blob/master/tools/shm_launcher.c)
+  # Updated 2026-02-28: Replaced embedded source and base64 with the latest version
+  #                     which includes launch-config.txt parsing support to fix
+  #                     issues matching the cluckers repo.
   # ==============================================================================
 #   /*
 #    * shm_launcher.c - Creates a named shared memory section with content bootstrap
 #    * data, then launches the game executable. The game expects to find the bootstrap
 #    * via OpenFileMapping() using the name passed in -content_bootstrap_shm=.
 #    *
-#    * Build: x86_64-w64-mingw32-gcc -o shm_launcher.exe shm_launcher.c
+#    * Build: x86_64-w64-mingw32-gcc -o shm_launcher.exe shm_launcher.c -municode
 #    * Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]
+#    *
+#    * When no CLI arguments are given, reads arguments from launch-config.txt in the
+#    * same directory as the executable. Each line in the config file is one argument
+#    * (line 1 = bootstrap_file, line 2 = shm_name, line 3 = game_exe, rest = game args).
 #    *
 #    * The launcher:
 #    *   1. Reads bootstrap data from <bootstrap_file>
@@ -3475,15 +3488,91 @@ BLAKE3EOF
 #   #include <windows.h>
 #   #include <stdio.h>
 #
-#   int wmain(int argc, wchar_t *argv[]) {
-#       if (argc < 4) {
-#           fprintf(stderr, "Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]\n");
-#           return 1;
+#   #define MAX_CONFIG_ARGS 64
+#   #define MAX_LINE_LEN 4096
+#
+#   /*
+#    * read_config_file - Reads launch-config.txt from the same directory as the
+#    * running executable. Each non-empty line becomes one argument.
+#    * Returns the number of arguments read, or 0 on failure.
+#    */
+#   static int read_config_file(wchar_t *args[], int max_args) {
+#       /* Get the path of the running executable. */
+#       wchar_t exe_path[MAX_PATH];
+#       DWORD len = GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+#       if (len == 0 || len >= MAX_PATH) {
+#           fprintf(stderr, "GetModuleFileName failed (err=%lu)\n", GetLastError());
+#           return 0;
 #       }
 #
-#       wchar_t *bootstrap_file = argv[1];
-#       wchar_t *shm_name = argv[2];
-#       wchar_t *game_exe = argv[3];
+#       /* Replace the exe filename with launch-config.txt. */
+#       wchar_t *last_slash = wcsrchr(exe_path, L'\\');
+#       if (!last_slash) last_slash = wcsrchr(exe_path, L'/');
+#       if (last_slash)
+#           wcscpy(last_slash + 1, L"launch-config.txt");
+#       else
+#           wcscpy(exe_path, L"launch-config.txt");
+#
+#       FILE *f = _wfopen(exe_path, L"r, ccs=UTF-8");
+#       if (!f) {
+#           fprintf(stderr, "Could not open config file: %ls (err=%lu)\n", exe_path, GetLastError());
+#           return 0;
+#       }
+#
+#       printf("[shm_launcher] Reading config: %ls\n", exe_path);
+#
+#       int count = 0;
+#       wchar_t line_buf[MAX_LINE_LEN];
+#       while (count < max_args && fgetws(line_buf, MAX_LINE_LEN, f)) {
+#           /* Strip trailing newline/carriage return. */
+#           size_t line_len = wcslen(line_buf);
+#           while (line_len > 0 && (line_buf[line_len - 1] == L'\n' || line_buf[line_len - 1] == L'\r')) {
+#               line_buf[--line_len] = L'\0';
+#           }
+#
+#           /* Skip empty lines. */
+#           if (line_len == 0) continue;
+#
+#           args[count] = (wchar_t *)malloc((line_len + 1) * sizeof(wchar_t));
+#           if (!args[count]) {
+#               fprintf(stderr, "malloc failed for config line %d\n", count);
+#               fclose(f);
+#               return count;
+#           }
+#           wcscpy(args[count], line_buf);
+#           count++;
+#       }
+#
+#       fclose(f);
+#       printf("[shm_launcher] Read %d args from config\n", count);
+#       return count;
+#   }
+#
+#   int wmain(int argc, wchar_t *argv[]) {
+#       wchar_t *config_args[MAX_CONFIG_ARGS];
+#       int config_argc = 0;
+#       int use_config = 0;
+#
+#       if (argc < 4) {
+#           /* No CLI args — try config file. */
+#           config_argc = read_config_file(config_args, MAX_CONFIG_ARGS);
+#           if (config_argc < 3) {
+#               fprintf(stderr, "Usage: shm_launcher.exe <bootstrap_file> <shm_name> <game_exe> [game_args...]\n");
+#               fprintf(stderr, "  Or place a launch-config.txt next to the executable.\n");
+#               /* Free any partially read config args. */
+#               for (int i = 0; i < config_argc; i++) free(config_args[i]);
+#               return 1;
+#           }
+#           use_config = 1;
+#       }
+#
+#       /* Select argument source: CLI or config file. */
+#       int eff_argc = use_config ? config_argc : (argc - 1);
+#       wchar_t **eff_argv = use_config ? config_args : (argv + 1);
+#
+#       wchar_t *bootstrap_file = eff_argv[0];
+#       wchar_t *shm_name = eff_argv[1];
+#       wchar_t *game_exe = eff_argv[2];
 #
 #       /* Read bootstrap data from file */
 #       HANDLE hFile = CreateFileW(bootstrap_file, GENERIC_READ, FILE_SHARE_READ,
@@ -3547,9 +3636,9 @@ BLAKE3EOF
 #       /* Quote the exe path */
 #       pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L"\"%ls\"", game_exe);
 #
-#       /* Append remaining args */
-#       for (int i = 4; i < argc; i++) {
-#           pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L" %ls", argv[i]);
+#       /* Append remaining args (index 3+ in effective argv) */
+#       for (int i = 3; i < eff_argc; i++) {
+#           pos += swprintf(cmdline + pos, sizeof(cmdline)/sizeof(wchar_t) - pos, L" %ls", eff_argv[i]);
 #       }
 #
 #       printf("[shm_launcher] Launching: %ls\n", cmdline);
@@ -3580,8 +3669,14 @@ BLAKE3EOF
 #       UnmapViewOfFile(pView);
 #       CloseHandle(hMapping);
 #
+#       /* Free config file args if used. */
+#       if (use_config) {
+#           for (int i = 0; i < config_argc; i++) free(config_args[i]);
+#       }
+#
 #       return (int)exitCode;
 #   }
+#
   # ==============================================================================
   # SOURCE CODE: xinput_remap.c (https://github.com/0xc0re/cluckers/blob/master/tools/xinput_remap.c)
   # ==============================================================================
@@ -4076,6 +4171,7 @@ export WINEARCH="win64"
 
 # Setup-time variables baked in as plain strings.
 USE_GAMESCOPE="${use_gamescope}"
+WAYLAND_CURSOR_FIX="${wayland_cursor_fix}"
 GS_ARGS="${GAMESCOPE_ARGS}"
 GAME_DIR="${GAME_DIR}"
 GAME_EXE_REL="${GAME_EXE_REL}"
@@ -4094,18 +4190,19 @@ export WINEDEBUG="-all"
 # d3d10core=n,b: use DXVK's d3d10 implementation alongside d3d11 (they share the same
 #               DXVK library; both must be set native or neither will work).
 # xinput1_3=n:  use our custom xinput remapper installed in Step 6.
-# winex11.drv=: disables the X11 driver in Wine. This is a fix for the "cursor 
-#               spinning" problem when running in fullscreen (-f) on some 
-#               Wayland-based systems. NOTE: This is only applied when Gamescope
-#               is NOT used, as Gamescope requires the X11 driver to function.
+# winex11.drv=: disables the winex11 driver, which may help force Wine into using
+#               the Wayland driver instead, depending on how the launcher
+#               initializes Wine. Fixes cursor warping in games (incorrect cursor
+#               behavior, or the cursor not being properly confined to the game
+#               window) when running under Proton on Wayland.
+#               Only applied if the user passes --wayland-cursor-fix.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
   _overrides="dxgi=n;xinput1_3=n"
-  if [[ "${use_gamescope}" == "false" ]]; then
+  if [[ "${WAYLAND_CURSOR_FIX}" == "true" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
-  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
-  # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
+  printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"  # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
   # all joysticks. Without this, Wine's winebus.sys and SDL's HIDAPI layer both
   # enumerate the same physical device, causing duplicate axis events and phantom
   # camera spin in UE3 games. SDL_HINT_JOYSTICK_HIDAPI_PS4 / _PS5 are per-device
@@ -4146,7 +4243,7 @@ done
 SDLEOF
 else
   _overrides="dxgi=n"
-  if [[ "${use_gamescope}" == "false" ]]; then
+  if [[ "${WAYLAND_CURSOR_FIX}" == "true" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
   printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
@@ -4402,9 +4499,20 @@ fi
 if [[ -n "${PROTON_SCRIPT}" ]]; then
   # Required by proton run
   export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
-  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${HOME}/.steam/root"
+  
+  # Detect actual Steam install path so Steam API initializes correctly
+  _steam_root="${HOME}/.steam/root"
+  for _cand in "${HOME}/.local/share/Steam" "${HOME}/.steam/steam" "${HOME}/.var/app/com.valvesoftware.Steam/data/Steam" "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam" "${HOME}/snap/steam/common/.local/share/Steam"; do
+    if [[ -d "${_cand}" ]]; then _steam_root="${_cand}"; break; fi
+  done
+  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${_steam_root}"
+  
   export SteamGameId="0"
   export SteamAppId="0"
+  
+  # Unset environment variables that conflict with Proton's internal management
+  unset WINEPREFIX WINE LD_LIBRARY_PATH WINEFSYNC WINEESYNC
+  
   _launch_cmd=("python3" "${PROTON_SCRIPT}" "run")
 else
   _launch_cmd=("${WINE}")
@@ -4426,6 +4534,12 @@ else
 fi
 
 # Pass termination signals to the child process so it can shut down gracefully.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   Always 0.
 _term() {
   trap '' INT TERM HUP
   kill -TERM "${_PID}" 2>/dev/null || true
