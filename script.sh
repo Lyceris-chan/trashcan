@@ -4212,6 +4212,8 @@ done
   export SteamAppId="813820"
   export SteamGameId="813820"
   export STEAM_COMPAT_APP_ID="813820"
+  export GAMEID="813820"
+  export UMU_ID="813820"
   export SteamUser="${USER}"
   export SteamAppUser="${USER}"
   export SteamClientLaunch="1"
