@@ -4484,7 +4484,7 @@ if [[ -n "${PROTON_SCRIPT}" ]]; then
   # Prepare the launch command. We use 'env -u' to strip environment variables 
   # that conflict with Proton's internal management without unsetting them
   # globally, so they remain available for the cleanup section at the end.
-  _launch_cmd=(env -u WINEPREFIX -u WINE -u LD_LIBRARY_PATH -u WINEFSYNC -u WINEESYNC "python3" "${PROTON_SCRIPT}" "run")
+  _launch_cmd=(env -u WINEPREFIX -u WINE -u LD_LIBRARY_PATH -u WINEFSYNC -u WINEESYNC "python3" "${PROTON_SCRIPT}" "waitforexitandrun")
 else
   _launch_cmd=("${WINE}")
 fi
