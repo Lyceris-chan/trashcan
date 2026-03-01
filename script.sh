@@ -4191,6 +4191,12 @@ done
   real_wineserver="$(dirname "${real_wine_path}")/wineserver"
   [[ ! -x "${real_wineserver}" ]] && real_wineserver="wineserver"
 
+  local _steam_root="${HOME}/.steam/root"
+  local _cand
+  for _cand in "${HOME}/.local/share/Steam" "${HOME}/.steam/steam" "${HOME}/.steam/root" "${HOME}/.var/app/com.valvesoftware.Steam/data/Steam" "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam" "${HOME}/snap/steam/common/.local/share/Steam"; do
+    if [[ -d "${_cand}" ]]; then _steam_root="${_cand}"; break; fi
+  done
+
   # Part 1: setup-time values baked in as plain strings.
   # We use a sed pipe to strip the 2-space indentation so the shebang is valid.
   sed 's/^  //' > "${LAUNCHER_SCRIPT}" << EOF
@@ -4209,6 +4215,8 @@ done
   export SteamUser="${USER}"
   export SteamAppUser="${USER}"
   export SteamClientLaunch="1"
+  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${_steam_root}"
+  export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
 
   # Set PATH and LD_LIBRARY_PATH to include Wine's internal libraries and
   # binaries. Prepend them to any existing paths.
@@ -4471,16 +4479,6 @@ fi
 # required by the Unreal Engine 3 ServerTravel match transition. Without it,
 # the game may hang on the loading screen when entering a match.
 if [[ -n "${PROTON_SCRIPT}" ]]; then
-  # Required by proton run
-  export STEAM_COMPAT_DATA_PATH="${CLUCKERS_ROOT}"
-  
-  # Detect actual Steam install path so Steam API initializes correctly
-  _steam_root="${HOME}/.steam/root"
-  for _cand in "${HOME}/.local/share/Steam" "${HOME}/.steam/steam" "${HOME}/.var/app/com.valvesoftware.Steam/data/Steam" "${HOME}/.var/app/com.valvesoftware.Steam/.local/share/Steam" "${HOME}/snap/steam/common/.local/share/Steam"; do
-    if [[ -d "${_cand}" ]]; then _steam_root="${_cand}"; break; fi
-  done
-  export STEAM_COMPAT_CLIENT_INSTALL_PATH="${_steam_root}"
-  
   # Prepare the launch command. We use 'env -u' to strip environment variables 
   # that conflict with Proton's internal management without unsetting them
   # globally, so they remain available for the cleanup section at the end.
@@ -4488,7 +4486,6 @@ if [[ -n "${PROTON_SCRIPT}" ]]; then
 else
   _launch_cmd=("${WINE}")
 fi
-
 if [[ -s "${_bootstrap_tmp}" ]]; then
   _game_args=("${TOOLS_DIR}/shm_launcher.exe" "${_bootstrap_wine}" "${_shm_name}" "${_game_exe_wine}" "${_game_args[@]}")
 else
