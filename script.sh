@@ -23,7 +23,7 @@
 #                                                 # Also triggered when both -g and -c are passed.
 #    ./cluckers-setup.sh --steam-deck             # opt-in: apply game patches (Deck)    (-d)
 #    ./cluckers-setup.sh --controller             # opt-in: enable controller support   (-c)
-#    ./cluckers-setup.sh --wayland-cursor-fix     # opt-in: disable winex11 driver to fix cursor warping under Proton
+#    ./cluckers-setup.sh --wayland-cursor-fix     # opt-in: disable winex11 to fix cursor warping under Proton on Wayland-only desktops (e.g., COSMIC)
 #    ./cluckers-setup.sh --update                 # check for game update       (-u)
 #    ./cluckers-setup.sh --uninstall              # remove everything
 #    ./cluckers-setup.sh --help                   # show this help message      (-h)
@@ -4190,11 +4190,11 @@ export WINEDEBUG="-all"
 # d3d10core=n,b: use DXVK's d3d10 implementation alongside d3d11 (they share the same
 #               DXVK library; both must be set native or neither will work).
 # xinput1_3=n:  use our custom xinput remapper installed in Step 6.
-# winex11.drv=: disables the winex11 driver, which may help force Wine into using
-#               the Wayland driver instead, depending on how the launcher
-#               initializes Wine. Fixes cursor warping in games (incorrect cursor
-#               behavior, or the cursor not being properly confined to the game
-#               window) when running under Proton on Wayland.
+# winex11.drv=: disables the winex11 driver. This does not break Proton-GE, but it
+#               will break the X11 connection. It forces Wine into using the
+#               Wayland driver instead. This is necessary to fix cursor warping
+#               (incorrect behavior or failing to confine the cursor to the game
+#               window) on Wayland-only desktop environments like COSMIC.
 #               Only applied if the user passes --wayland-cursor-fix.
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
