@@ -4201,7 +4201,7 @@ export WINEDEBUG="-all"
 # Source: https://github.com/0xc0re/cluckers/blob/master/internal/launch/process.go
 $(if [[ "${controller_mode}" == "true" || "${steam_deck}" == "true" ]]; then
   _overrides="dxgi=n;xinput1_3=n"
-  if [[ "${WAYLAND_CURSOR_FIX}" == "true" ]]; then
+  if [[ "${wayland_cursor_fix}" == "true" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
   printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"  # SDL_HINT_JOYSTICK_HIDAPI — when set to "0" disables SDL's HIDAPI driver for
@@ -4245,7 +4245,7 @@ done
 SDLEOF
 else
   _overrides="dxgi=n"
-  if [[ "${WAYLAND_CURSOR_FIX}" == "true" ]]; then
+  if [[ "${wayland_cursor_fix}" == "true" ]]; then
     _overrides="${_overrides};winex11.drv="
   fi
   printf 'export WINEDLLOVERRIDES="%s"\n' "${_overrides}"
@@ -4512,10 +4512,10 @@ if [[ -n "${PROTON_SCRIPT}" ]]; then
   export SteamGameId="0"
   export SteamAppId="0"
   
-  # Unset environment variables that conflict with Proton's internal management
-  unset WINEPREFIX WINE LD_LIBRARY_PATH WINEFSYNC WINEESYNC
-  
-  _launch_cmd=("python3" "${PROTON_SCRIPT}" "run")
+  # Prepare the launch command. We use 'env -u' to strip environment variables 
+  # that conflict with Proton's internal management without unsetting them
+  # globally, so they remain available for the cleanup section at the end.
+  _launch_cmd=(env -u WINEPREFIX -u WINE -u LD_LIBRARY_PATH -u WINEFSYNC -u WINEESYNC "python3" "${PROTON_SCRIPT}" "run")
 else
   _launch_cmd=("${WINE}")
 fi
